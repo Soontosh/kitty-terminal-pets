@@ -57,6 +57,7 @@ if ! "$APP_DIR/venv/bin/python" -c 'from PIL import Image' >/dev/null 2>&1; then
     say "Installing the Pillow image dependency"
     "$APP_DIR/venv/bin/python" -m pip install --quiet --disable-pip-version-check 'Pillow>=10,<13'
 fi
+"$APP_DIR/venv/bin/python" -m compileall -q "$APP_DIR/kitty_pet.py"
 
 wrapper=$(mktemp)
 printf '#!/usr/bin/env bash\nset -euo pipefail\nexec %q %q "$@"\n' \
@@ -89,6 +90,8 @@ config.setdefault("pane_percent", 13)
 config.setdefault("pet_rows", 7)
 config.setdefault("cursor_offset_rows", 1)
 config.setdefault("completion_seconds", 2.5)
+config.setdefault("controller_poll_seconds", 1.0)
+config.setdefault("startup_delay_seconds", 0.75)
 config.setdefault("timings", {})
 path.parent.mkdir(parents=True, exist_ok=True)
 fd, raw = tempfile.mkstemp(prefix=".config.", dir=path.parent)
@@ -142,18 +145,21 @@ ExecStart=$BIN_DIR/kitty-pet controller
 Restart=on-failure
 RestartSec=2
 Nice=10
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
 
 [Install]
 WantedBy=default.target
 EOF
+
+"$BIN_DIR/kitty-pet" self-test
 
 if [[ $SKIP_SERVICE != 1 ]]; then
     command -v systemctl >/dev/null 2>&1 || die "systemd user services are required"
     systemctl --user daemon-reload
     systemctl --user enable --now kitty-pet.service
 fi
-
-"$BIN_DIR/kitty-pet" self-test
 
 if [[ $SKIP_RELOAD != 1 ]]; then
     for pid in $(pgrep -x kitty 2>/dev/null || true); do

@@ -23,6 +23,22 @@
     a.button { border-radius: 10px; padding: 11px 17px; background: var(--mint); color: #11111b; font-weight: 750; text-decoration: none; }
     a.button.secondary { background: var(--panel); color: var(--blue); border: 1px solid #313244; }
     .demo { width: 100%; border: 1px solid #313244; border-radius: 16px; box-shadow: 0 24px 70px #0008; }
+    .showcase { margin: 54px 0 0; }
+    .showcase-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 18px; }
+    .showcase-head h2 { margin: 0; font-size: clamp(1.65rem, 4vw, 2.45rem); line-height: 1.1; letter-spacing: -.035em; }
+    .showcase-head p { max-width: 590px; margin: 8px 0 0; color: var(--soft); }
+    .reel-controls { display: flex; align-items: center; gap: 9px; flex: 0 0 auto; }
+    .reel-count { min-width: 3.5rem; color: var(--soft); text-align: center; font: 700 .9rem/1 ui-monospace, monospace; }
+    .reel-button { width: 42px; height: 42px; border: 1px solid #45475a; border-radius: 50%; background: var(--panel); color: var(--text); cursor: pointer; font: 700 1.2rem/1 system-ui, sans-serif; }
+    .reel-button:hover:not(:disabled), .reel-button:focus-visible { border-color: var(--blue); color: var(--blue); outline: none; }
+    .reel-button:disabled { cursor: default; opacity: .35; }
+    .pet-reel { display: grid; grid-auto-flow: column; grid-auto-columns: min(88%, 920px); gap: 18px; overflow-x: auto; padding: 4px 4px 19px; scroll-behavior: smooth; scroll-snap-type: x mandatory; scrollbar-color: var(--blue) #242438; scrollbar-width: thin; overscroll-behavior-inline: contain; }
+    .pet-card { overflow: hidden; scroll-snap-align: start; background: var(--panel); border: 1px solid #313244; border-radius: 16px; box-shadow: 0 16px 46px #0005; }
+    .pet-card img { display: block; width: 100%; aspect-ratio: 1214 / 686; object-fit: cover; background: #24273a; }
+    .pet-card-copy { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 16px 19px 18px; }
+    .pet-card h3 { margin: 0; color: var(--mint); font-size: 1.1rem; }
+    .pet-card p { margin: 0; color: var(--soft); font-size: .94rem; text-align: right; }
+    .showcase-note { margin: 5px 4px 0; color: var(--soft); font-size: .82rem; }
     .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 48px 0; }
     .card { background: var(--panel); border: 1px solid #313244; border-radius: 14px; padding: 22px; }
     .card h2 { margin-top: 0; font-size: 1.1rem; color: var(--mint); }
@@ -30,7 +46,20 @@
     pre { overflow: auto; background: #0b0b12; border: 1px solid #313244; border-radius: 12px; padding: 17px; }
     footer { color: var(--soft); margin-top: 50px; }
     footer a { color: var(--blue); }
-    @media (max-width: 720px) { main { padding-top: 45px; } .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 720px) {
+      main { padding-top: 45px; }
+      .showcase-head { align-items: start; }
+      .showcase-head p { font-size: .95rem; }
+      .pet-reel { grid-auto-columns: 94%; }
+      .pet-card-copy { display: block; }
+      .pet-card p { margin-top: 3px; text-align: left; }
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 500px) {
+      .showcase-head { display: block; }
+      .reel-controls { margin-top: 15px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .pet-reel { scroll-behavior: auto; } }
   </style>
 </head>
 <body>
@@ -42,6 +71,38 @@
       <a class="button secondary" href="https://github.com/Soontosh/kitty-terminal-pets">Browse the code</a>
     </div>
     <img class="demo" src="https://raw.githubusercontent.com/Soontosh/kitty-terminal-pets/main/demo/kitty-terminal-pets.gif" alt="A Byte Cat pet following the command line inside Kitty terminal">
+    <section class="showcase" aria-labelledby="showcase-title">
+      <div class="showcase-head">
+        <div>
+          <h2 id="showcase-title">More pets, same rice.</h2>
+          <p>Captured on the machine that started the project. Scroll, swipe, or use the arrows to meet the rest of the crew.</p>
+        </div>
+        <div class="reel-controls" aria-label="Pet showcase controls">
+          <button class="reel-button" id="reel-previous" type="button" aria-label="Show previous pet" disabled>←</button>
+          <span class="reel-count" id="reel-count" aria-live="polite">1 / 4</span>
+          <button class="reel-button" id="reel-next" type="button" aria-label="Show next pet">→</button>
+        </div>
+      </div>
+      <div class="pet-reel" id="pet-reel" tabindex="0" aria-label="Animated terminal pet examples">
+        <article class="pet-card">
+          <img src="assets/examples/killua.gif" alt="Killua working beside the command line in a riced Kitty terminal">
+          <div class="pet-card-copy"><h3>Killua</h3><p>Godspeed mode: activated.</p></div>
+        </article>
+        <article class="pet-card">
+          <img src="assets/examples/luffy.gif" alt="Luffy running beside the command line in a riced Kitty terminal" loading="lazy">
+          <div class="pet-card-copy"><h3>Luffy</h3><p>A tiny captain for long commands.</p></div>
+        </article>
+        <article class="pet-card">
+          <img src="assets/examples/kid-obito.gif" alt="Kid Obito working beside the command line in a riced Kitty terminal" loading="lazy">
+          <div class="pet-card-copy"><h3>Kid Obito</h3><p>Quietly keeping watch over the build.</p></div>
+        </article>
+        <article class="pet-card">
+          <img src="assets/examples/tobirama.gif" alt="Tobirama working beside the command line in a riced Kitty terminal" loading="lazy">
+          <div class="pet-card-copy"><h3>Tobirama</h3><p>Serious focus for serious terminal work.</p></div>
+        </article>
+      </div>
+      <p class="showcase-note">Character pet files are not bundled with the project; these are contextual captures of locally installed Petdex pets.</p>
+    </section>
     <section class="grid">
       <article class="card"><h2>Stays out of the way</h2><p>No shell traps, no TTY readers, and no per-keystroke hooks. Your terminal remains your terminal.</p></article>
       <article class="card"><h2>Shares your Petdex</h2><p>It finds pets in <code>~/.codex/pets</code>, plus its own neutral pet folder.</p></article>
@@ -51,5 +112,47 @@
     <pre><code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/Soontosh/kitty-terminal-pets/main/install.sh)</code></pre>
     <footer>MIT licensed. Made with an arguably unreasonable amount of care for terminal ergonomics. <a href="https://github.com/Soontosh/kitty-terminal-pets/blob/main/docs/SETUP.md">Read the full setup guide.</a></footer>
   </main>
+  <script>
+    const reel = document.querySelector('#pet-reel');
+    const cards = [...reel.querySelectorAll('.pet-card')];
+    const previous = document.querySelector('#reel-previous');
+    const next = document.querySelector('#reel-next');
+    const count = document.querySelector('#reel-count');
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let activeIndex = 0;
+
+    const updateControls = () => {
+      const reelLeft = reel.getBoundingClientRect().left;
+      activeIndex = cards.reduce((closest, card, index) => {
+        const distance = Math.abs(card.getBoundingClientRect().left - reelLeft);
+        return distance < closest.distance ? { index, distance } : closest;
+      }, { index: 0, distance: Infinity }).index;
+      previous.disabled = activeIndex === 0;
+      next.disabled = activeIndex === cards.length - 1;
+      count.textContent = `${activeIndex + 1} / ${cards.length}`;
+    };
+
+    const showCard = index => cards[index].scrollIntoView({
+      behavior: reducedMotion.matches ? 'auto' : 'smooth',
+      block: 'nearest',
+      inline: 'start'
+    });
+
+    previous.addEventListener('click', () => showCard(Math.max(0, activeIndex - 1)));
+    next.addEventListener('click', () => showCard(Math.min(cards.length - 1, activeIndex + 1)));
+    reel.addEventListener('scroll', updateControls, { passive: true });
+    window.addEventListener('resize', updateControls, { passive: true });
+
+    reel.addEventListener('wheel', event => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+      const atStart = reel.scrollLeft <= 0;
+      const atEnd = reel.scrollLeft + reel.clientWidth >= reel.scrollWidth - 1;
+      if ((event.deltaY < 0 && atStart) || (event.deltaY > 0 && atEnd)) return;
+      event.preventDefault();
+      reel.scrollLeft += event.deltaY;
+    }, { passive: false });
+
+    updateControls();
+  </script>
 </body>
 </html>

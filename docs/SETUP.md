@@ -29,6 +29,7 @@ The installer:
 5. Adds a clearly marked block to `~/.config/kitty/kitty.conf`.
 6. Enables `~/.config/systemd/user/kitty-pet.service`.
 7. Validates every discovered pet atlas.
+8. Precompiles the controller and prepares the selected pet's animation cache before starting the service.
 
 An existing `kitty.conf` is backed up before it is changed.
 
