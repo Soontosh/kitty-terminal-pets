@@ -2,13 +2,27 @@
 
 Animated little coworkers for the [Kitty terminal](https://sw.kovidgoyal.net/kitty/). They hang out in a slim rail on the right, follow your command line, and switch animations while commands run.
 
-![Kitty Terminal Pets demo](demo/kitty-terminal-pets.gif)
-
 [![CI](https://github.com/Soontosh/kitty-terminal-pets/actions/workflows/ci.yml/badge.svg)](https://github.com/Soontosh/kitty-terminal-pets/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-89b4fa.svg)](LICENSE)
 [![Linux](https://img.shields.io/badge/platform-Linux-a6e3a1.svg)](#requirements)
 
 [Project page](https://soontosh.github.io/kitty-terminal-pets/) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
+
+## See it in action
+
+### Killua on the rice
+
+![Killua animated terminal pet in a riced Kitty terminal on Linux](demo/killua-riced-kitty.gif)
+
+Killua absolutely stealing the show in the setup this project was born in. This is a privacy-safe live capture of the real Kitty theme, layout, and pet renderer—not a UI mockup.
+
+> Killua is a locally installed Petdex pet shown here for demonstration. Its character artwork and pet files are not distributed by this repository.
+
+### Byte Cat, right out of the box
+
+![Byte Cat starter pet in Kitty Terminal Pets](demo/kitty-terminal-pets.gif)
+
+Byte Cat is the original starter pet included with every fresh install.
 
 ## The nice bits
 
