@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPOSITORY="https://github.com/Soontosh/kitty-terminal-pets.git"
-ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)
 
 # Support the convenient curl | bash route without making the real installer
 # depend on files that were not downloaded.

@@ -48,4 +48,8 @@ if [[ $SKIP_RELOAD != 1 ]]; then
     done
 fi
 
-printf 'kitty-pet: uninstalled%s. Restart Kitty to remove the old socket.\n' "$([[ $PURGE == 1 ]] && printf ' and purged settings' || true)"
+suffix=""
+if (( PURGE )); then
+    suffix=" and purged settings"
+fi
+printf 'kitty-pet: uninstalled%s. Restart Kitty to remove the old socket.\n' "$suffix"

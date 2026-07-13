@@ -38,7 +38,10 @@ config="$XDG_CONFIG_HOME/kitty/kitty.conf"
 grep -F 'allow_remote_control socket-only' "$config" >/dev/null
 
 "$ROOT/uninstall.sh" --purge
-! grep -F 'kitty-terminal-pets' "$config" >/dev/null
+if grep -F 'kitty-terminal-pets' "$config" >/dev/null; then
+    printf 'Managed Kitty block survived uninstall.\n' >&2
+    exit 1
+fi
 [[ ! -e "$KITTY_PET_BIN_DIR/kitty-pet" ]]
 
 printf 'Smoke test passed.\n'
