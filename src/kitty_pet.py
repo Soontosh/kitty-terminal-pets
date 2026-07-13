@@ -11,16 +11,22 @@ import sys
 import time
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "kitty-pet"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "kitty-pet"
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/kitty-pet-{os.getuid()}")) / "kitty-pet"
+SOCKET_DIR = Path(
+    os.environ.get("KITTY_PET_SOCKET_DIR")
+    or os.environ.get("XDG_RUNTIME_DIR")
+    or f"/tmp/kitty-pet-{os.getuid()}"
+)
+RUNTIME_DIR = SOCKET_DIR / "kitty-pet"
 STATE_DIR = RUNTIME_DIR / "states"
 POSITION_DIR = RUNTIME_DIR / "positions"
 CODEX_PETS = Path(os.environ.get("CODEX_HOME", HOME / ".codex")) / "pets"
+PET_BINARY = Path(os.environ.get("KITTY_PET_BIN", HOME / ".local/bin/kitty-pet")).expanduser()
 SOCKET_GLOB = "kitty-pet-*.sock"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -64,23 +70,66 @@ def file_signature(path: Path) -> tuple[int, int, int] | None:
     return stat.st_ino, stat.st_mtime_ns, stat.st_size
 
 
+def kitty_executable() -> str:
+    """Find Kitty from a shell install or the standard macOS app bundle."""
+    import shutil
+
+    override = os.environ.get("KITTY_PET_KITTY_BIN")
+    if override:
+        return override
+    located = shutil.which("kitty")
+    if located:
+        return located
+    for candidate in (
+        Path("/Applications/kitty.app/Contents/MacOS/kitty"),
+        HOME / "Applications/kitty.app/Contents/MacOS/kitty",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return "kitty"
+
+
 class FileEventWaiter:
-    """Sleep until watched files change, with a polling fallback off Linux."""
+    """Sleep until watched files change via inotify, kqueue, or polling."""
 
     _WATCH_MASK = 0x0004 | 0x0008 | 0x0080 | 0x0100 | 0x0200 | 0x0400 | 0x0800
     _OVERFLOW = 0x4000
 
     def __init__(self) -> None:
+        self.backend = "poll"
         self.fd = -1
         self.wake_read = -1
         self.wake_write = -1
         self.previous_wakeup = -1
         self.previous_winch: Any = None
         self.directories: dict[int, Path] = {}
+        self.directory_fds: dict[int, Path] = {}
         self.watched: set[Path] = set()
         self.poller: Any = None
-        if not sys.platform.startswith("linux"):
-            return
+        self.kqueue: Any = None
+        self._select: Any = None
+        if sys.platform.startswith("linux"):
+            self._init_inotify()
+        elif sys.platform == "darwin":
+            self._init_kqueue()
+
+    @staticmethod
+    def _pipe() -> tuple[int, int]:
+        try:
+            return os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+        except AttributeError:
+            read_fd, write_fd = os.pipe()
+            os.set_blocking(read_fd, False)
+            os.set_blocking(write_fd, False)
+            return read_fd, write_fd
+
+    def _configure_wakeup(self) -> None:
+        self.wake_read, self.wake_write = self._pipe()
+        self.previous_wakeup = signal.set_wakeup_fd(self.wake_write)
+        self.previous_winch = signal.getsignal(signal.SIGWINCH)
+        signal.signal(signal.SIGWINCH, lambda *_: None)
+
+    def _init_inotify(self) -> None:
         try:
             import ctypes
             import select
@@ -98,19 +147,34 @@ class FileEventWaiter:
             self.fd = init(os.O_NONBLOCK | os.O_CLOEXEC)
             if self.fd < 0:
                 return
-            self.wake_read, self.wake_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
-            self.previous_wakeup = signal.set_wakeup_fd(self.wake_write)
-            self.previous_winch = signal.getsignal(signal.SIGWINCH)
-            signal.signal(signal.SIGWINCH, lambda *_: None)
+            self._configure_wakeup()
             self.poller = select.poll()
             self.poller.register(self.fd, self._pollin)
             self.poller.register(self.wake_read, self._pollin)
+            self.backend = "inotify"
+        except (AttributeError, OSError):
+            self.close()
+
+    def _init_kqueue(self) -> None:
+        try:
+            import select
+
+            self._select = select
+            self.kqueue = select.kqueue()
+            self._configure_wakeup()
+            wake_event = select.kevent(
+                self.wake_read,
+                filter=select.KQ_FILTER_READ,
+                flags=select.KQ_EV_ADD | select.KQ_EV_ENABLE | select.KQ_EV_CLEAR,
+            )
+            self.kqueue.control([wake_event], 0, 0)
+            self.backend = "kqueue"
         except (AttributeError, OSError):
             self.close()
 
     @property
     def event_driven(self) -> bool:
-        return self.poller is not None
+        return self.backend != "poll"
 
     def close(self) -> None:
         if self.wake_write >= 0:
@@ -120,25 +184,66 @@ class FileEventWaiter:
                 pass
             if self.previous_winch is not None:
                 signal.signal(signal.SIGWINCH, self.previous_winch)
-        for fd in (self.fd, self.wake_read, self.wake_write):
+        for fd in (*self.directory_fds, self.fd, self.wake_read, self.wake_write):
             if fd >= 0:
                 try:
                     os.close(fd)
                 except OSError:
                     pass
+        self.directory_fds.clear()
+        if self.kqueue is not None:
+            try:
+                self.kqueue.close()
+            except OSError:
+                pass
         self.fd = self.wake_read = self.wake_write = -1
         self.poller = None
+        self.kqueue = None
+        self.backend = "poll"
 
     def watch(self, paths: set[Path]) -> None:
-        if not self.event_driven:
+        if self.backend == "poll":
             return
-        for directory in {path.parent for path in paths} - self.watched:
-            try:
-                wd = self._add_watch(self.fd, os.fsencode(directory), self._WATCH_MASK)
-            except (AttributeError, OSError):
-                continue
-            if wd >= 0:
-                self.directories[wd] = directory
+        directories = {path.parent for path in paths} - self.watched
+        if self.backend == "inotify":
+            for directory in directories:
+                try:
+                    wd = self._add_watch(self.fd, os.fsencode(directory), self._WATCH_MASK)
+                except (AttributeError, OSError):
+                    continue
+                if wd >= 0:
+                    self.directories[wd] = directory
+                    self.watched.add(directory)
+            return
+        if self.backend == "kqueue":
+            flags = (
+                self._select.KQ_NOTE_WRITE
+                | self._select.KQ_NOTE_EXTEND
+                | self._select.KQ_NOTE_ATTRIB
+                | self._select.KQ_NOTE_LINK
+                | self._select.KQ_NOTE_RENAME
+                | self._select.KQ_NOTE_DELETE
+                | self._select.KQ_NOTE_REVOKE
+            )
+            for directory in directories:
+                fd = -1
+                try:
+                    fd = os.open(
+                        directory,
+                        getattr(os, "O_EVTONLY", os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0),
+                    )
+                    event = self._select.kevent(
+                        fd,
+                        filter=self._select.KQ_FILTER_VNODE,
+                        flags=self._select.KQ_EV_ADD | self._select.KQ_EV_ENABLE | self._select.KQ_EV_CLEAR,
+                        fflags=flags,
+                    )
+                    self.kqueue.control([event], 0, 0)
+                except (AttributeError, OSError):
+                    if fd >= 0:
+                        os.close(fd)
+                    continue
+                self.directory_fds[fd] = directory
                 self.watched.add(directory)
 
     @staticmethod
@@ -154,10 +259,33 @@ class FileEventWaiter:
         return b"".join(chunks)
 
     def wait(self, paths: set[Path], timeout: float = 30.0) -> None:
-        if not self.event_driven:
+        if self.backend == "poll":
             time.sleep(min(timeout, 0.5))
             return
         self.watch(paths)
+        if self.backend == "kqueue":
+            ready = self.kqueue.control(None, max(1, len(self.directory_fds) + 1), max(0.0, timeout))
+            invalidated = (
+                self._select.KQ_NOTE_DELETE
+                | self._select.KQ_NOTE_RENAME
+                | self._select.KQ_NOTE_REVOKE
+            )
+            for event in ready:
+                if event.ident == self.wake_read:
+                    self._drain(self.wake_read)
+                    return
+                directory = self.directory_fds.get(event.ident)
+                if directory is None:
+                    continue
+                if event.fflags & invalidated:
+                    self.directory_fds.pop(event.ident, None)
+                    self.watched.discard(directory)
+                    try:
+                        os.close(event.ident)
+                    except OSError:
+                        pass
+                return
+            return
         ready = self.poller.poll(max(0, round(timeout * 1000)))
         for fd, _ in ready:
             if fd == self.wake_read:
@@ -203,6 +331,12 @@ class Pet:
 
 
 def ensure_dirs() -> None:
+    SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if SOCKET_DIR.stat().st_uid == os.getuid():
+            SOCKET_DIR.chmod(0o700)
+    except OSError:
+        pass
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -521,7 +655,7 @@ def kitty_socket_command(socket: Path, *args: str, capture: bool = False) -> sub
     """Run a Kitty command over a Unix socket, never through a terminal TTY."""
     import subprocess
 
-    command = ["kitty", "@", f"--to=unix:{socket}", *args]
+    command = [kitty_executable(), "@", f"--to=unix:{socket}", *args]
     try:
         return subprocess.run(
             command,
@@ -581,8 +715,7 @@ def kitty_socket_request(socket: Path, command: str, payload: dict[str, Any]) ->
 
 
 def kitty_sockets() -> list[Path]:
-    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/kitty-pet-{os.getuid()}"))
-    return sorted(path for path in runtime.glob(SOCKET_GLOB) if path.exists())
+    return sorted(path for path in SOCKET_DIR.glob(SOCKET_GLOB) if path.exists())
 
 
 def position_file(socket: Path, tab_id: int) -> Path:
@@ -703,7 +836,7 @@ def launch_pane(
             kitty_socket_command(socket, "goto-layout", "--match", tab_match, "splits")
     bias = max(8, min(25, int(config.get("pane_percent", 13))))
     payload = {
-        "args": [str(HOME / ".local/bin/kitty-pet"), "render"],
+        "args": [str(PET_BINARY), "render"],
         "match": tab_match,
         "source_window": f"id:{source_window['id']}",
         "type": "window",
@@ -712,7 +845,13 @@ def launch_pane(
         "keep_focus": True,
         "copy_colors": True,
         "spacing": ["padding=2"],
-        "env": ["KITTY_PET_PANE=1", f"KITTY_PET_POSITION_FILE={target_position}"],
+        "env": [
+            "KITTY_PET_PANE=1",
+            f"KITTY_PET_POSITION_FILE={target_position}",
+            f"KITTY_PET_BIN={PET_BINARY}",
+            f"KITTY_PET_KITTY_BIN={kitty_executable()}",
+            f"KITTY_PET_SOCKET_DIR={SOCKET_DIR}",
+        ],
     }
     ok, _ = kitty_socket_call(socket, "launch", payload)
     if ok:
@@ -730,7 +869,10 @@ def launch_pane(
         "--spacing=padding=2",
         "--env=KITTY_PET_PANE=1",
         f"--env=KITTY_PET_POSITION_FILE={target_position}",
-        str(HOME / ".local/bin/kitty-pet"),
+        f"--env=KITTY_PET_BIN={PET_BINARY}",
+        f"--env=KITTY_PET_KITTY_BIN={kitty_executable()}",
+        f"--env=KITTY_PET_SOCKET_DIR={SOCKET_DIR}",
+        str(PET_BINARY),
         "render",
         capture=True,
     )
@@ -881,12 +1023,12 @@ def draw_animation(path: Path, geometry: tuple[int, int, int, int]) -> None:
     import subprocess
 
     columns, _, rows, top = geometry
-    subprocess.run(["kitty", "+kitten", "icat", "--clear", "--silent"], check=False)
+    subprocess.run([kitty_executable(), "+kitten", "icat", "--clear", "--silent"], check=False)
     sys.stdout.write("\033[2J\033[H")
     sys.stdout.flush()
     subprocess.run(
         [
-            "kitty", "+kitten", "icat", "--align=center", f"--place={columns}x{rows}@0x{top}",
+            kitty_executable(), "+kitten", "icat", "--align=center", f"--place={columns}x{rows}@0x{top}",
             "--scale-up=no", "--loop=-1", "--transfer-mode=memory", str(path),
         ],
         check=False,
@@ -954,7 +1096,7 @@ def render() -> int:
                     draw_animation(animation, geometry)
                     mark_renderer_idle()
                 else:
-                    subprocess.run(["kitty", "+kitten", "icat", "--clear", "--silent"], check=False)
+                    subprocess.run([kitty_executable(), "+kitten", "icat", "--clear", "--silent"], check=False)
                     sys.stdout.write("\033[2J\033[H\033]2;Terminal Pet: paused\007")
                     mark_renderer_idle()
                 last_key = key

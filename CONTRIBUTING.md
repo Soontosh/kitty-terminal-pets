@@ -17,3 +17,5 @@ python3 demo/generate_assets.py
 ```
 
 Please do not add copyrighted character artwork to the repository. Compatibility code and manifests are welcome; users can install third-party art separately under its own terms.
+
+Pull requests run the install and runtime test suite on both Ubuntu and macOS. Platform-specific service changes should keep the systemd and launchd paths idempotent.

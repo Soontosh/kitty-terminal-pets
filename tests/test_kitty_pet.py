@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -199,13 +200,15 @@ class PetTests(unittest.TestCase):
             kitty_pet.mark_renderer_idle()
         self.assertEqual("\x1b]133;A\x1b\\", output.getvalue())
 
-    def test_linux_file_waiter_wakes_for_atomic_replacement(self) -> None:
+    def test_native_file_waiter_wakes_for_atomic_replacement(self) -> None:
         target = Path(TEMP_ROOT.name) / "events" / "state.json"
         target.parent.mkdir(exist_ok=True)
         waiter = kitty_pet.FileEventWaiter()
         try:
             if not waiter.event_driven:
-                self.skipTest("inotify is unavailable")
+                self.skipTest("native filesystem events are unavailable")
+            expected = "inotify" if sys.platform.startswith("linux") else "kqueue"
+            self.assertEqual(expected, waiter.backend)
             waiter.watch({target})
             kitty_pet.atomic_json(target, {"state": "running"})
             started = time.perf_counter()
@@ -213,6 +216,62 @@ class PetTests(unittest.TestCase):
             self.assertLess(time.perf_counter() - started, 0.5)
         finally:
             waiter.close()
+
+    def test_macos_file_waiter_uses_kqueue_vnode_events(self) -> None:
+        class FakeKqueue:
+            def __init__(self) -> None:
+                self.changes: list[object] = []
+                self.ready: list[object] = []
+                self.closed = False
+
+            def control(self, changes, _max_events, _timeout):
+                if changes:
+                    self.changes.extend(changes)
+                    return []
+                ready, self.ready = self.ready, []
+                return ready
+
+            def close(self) -> None:
+                self.closed = True
+
+        queue = FakeKqueue()
+        fake_select = types.SimpleNamespace(
+            KQ_FILTER_READ=-1,
+            KQ_FILTER_VNODE=-4,
+            KQ_EV_ADD=1,
+            KQ_EV_ENABLE=4,
+            KQ_EV_CLEAR=32,
+            KQ_NOTE_DELETE=1,
+            KQ_NOTE_WRITE=2,
+            KQ_NOTE_EXTEND=4,
+            KQ_NOTE_ATTRIB=8,
+            KQ_NOTE_LINK=16,
+            KQ_NOTE_RENAME=32,
+            KQ_NOTE_REVOKE=64,
+            kqueue=lambda: queue,
+            kevent=lambda ident, **values: types.SimpleNamespace(ident=ident, **values),
+        )
+        target = Path(TEMP_ROOT.name) / "mac-events" / "state.json"
+        target.parent.mkdir(exist_ok=True)
+        with (
+            mock.patch.object(kitty_pet.sys, "platform", "darwin"),
+            mock.patch.dict(sys.modules, {"select": fake_select}),
+        ):
+            waiter = kitty_pet.FileEventWaiter()
+            try:
+                self.assertEqual("kqueue", waiter.backend)
+                waiter.watch({target})
+                directory_fd = next(iter(waiter.directory_fds))
+                queue.ready.append(
+                    types.SimpleNamespace(ident=directory_fd, fflags=fake_select.KQ_NOTE_WRITE)
+                )
+                started = time.perf_counter()
+                waiter.wait({target}, timeout=1)
+                self.assertLess(time.perf_counter() - started, 0.1)
+                self.assertTrue(any(change.filter == fake_select.KQ_FILTER_VNODE for change in queue.changes))
+            finally:
+                waiter.close()
+        self.assertTrue(queue.closed)
 
     def test_unchanged_tab_state_does_not_rewrite_position_file(self) -> None:
         existing = {
@@ -278,6 +337,8 @@ class PetTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual("launch", calls[-1][0])
         self.assertTrue(calls[-1][1]["keep_focus"])
+        self.assertIn(f"KITTY_PET_SOCKET_DIR={kitty_pet.SOCKET_DIR}", calls[-1][1]["env"])
+        self.assertIn(f"KITTY_PET_BIN={kitty_pet.PET_BINARY}", calls[-1][1]["env"])
         cli.assert_not_called()
 
     def test_startup_delay_is_bounded_and_non_blocking(self) -> None:

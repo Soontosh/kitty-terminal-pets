@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 — 2026-07-13
+
+- Added native macOS installation and uninstall support through a per-user launchd agent.
+- Added macOS `kqueue` file notifications so idle renderers remain event-driven.
+- Added automatic discovery of the standard `/Applications/kitty.app` executable.
+- Moved control sockets to a short, private cross-platform runtime path when `XDG_RUNTIME_DIR` is unavailable.
+- Added macOS install simulation, launchd plist validation, kqueue tests, and a macOS GitHub Actions job.
+- Documented platform-specific setup, service status, logging, and troubleshooting commands.
+
 ## 1.2.0 — 2026-07-13
 
 - Replaced five-times-per-second renderer polling with Linux `inotify` events.
