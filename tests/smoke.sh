@@ -5,7 +5,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
 
-python3 -m compileall -q "$ROOT/src" "$ROOT/demo/generate_assets.py"
+python3 -m compileall -q "$ROOT/src" "$ROOT/demo"
 python3 -m json.tool "$ROOT/assets/byte-cat/pet.json" >/dev/null
 python3 -m unittest discover -s "$ROOT/tests" -v
 

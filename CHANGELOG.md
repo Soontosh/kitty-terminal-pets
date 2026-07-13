@@ -8,6 +8,7 @@
 - Moved control sockets to a short, private cross-platform runtime path when `XDG_RUNTIME_DIR` is unavailable.
 - Added macOS install simulation, launchd plist validation, kqueue tests, and a macOS GitHub Actions job.
 - Documented platform-specific setup, service status, logging, and troubleshooting commands.
+- Re-recorded every real-terminal showcase through startup, typing, running, success, and failure.
 
 ## 1.2.0 — 2026-07-13
 

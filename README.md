@@ -14,7 +14,7 @@ Animated little coworkers for the [Kitty terminal](https://sw.kovidgoyal.net/kit
 
 ![Killua animated terminal pet in a riced Kitty terminal on Linux](demo/killua-riced-kitty.gif)
 
-Killua absolutely stealing the show in the setup this project was born in. This is a privacy-safe live capture of the real Kitty theme, layout, and pet renderer—not a UI mockup.
+Killua absolutely stealing the show in the setup this project was born in. The loop follows a complete terminal session: boot, slow typing, running, success, and failure. This is a privacy-safe live capture of the real Kitty theme, layout, and pet renderer—not a UI mockup.
 
 > Killua is a locally installed Petdex pet shown here for demonstration. Its character artwork and pet files are not distributed by this repository.
 

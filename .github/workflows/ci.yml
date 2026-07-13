@@ -51,4 +51,21 @@ jobs:
               assert path.is_file(), name
               with Image.open(path) as image:
                   assert image.size == size, (name, image.size)
+
+          showcases = [
+              "demo/killua-riced-kitty.gif",
+              "docs/assets/examples/killua.gif",
+              "docs/assets/examples/luffy.gif",
+              "docs/assets/examples/kid-obito.gif",
+              "docs/assets/examples/tobirama.gif",
+          ]
+          for name in showcases:
+              with Image.open(name) as image:
+                  assert image.size == (1214, 686), (name, image.size)
+                  assert image.n_frames >= 100, (name, image.n_frames)
+                  duration = 0
+                  for frame in range(image.n_frames):
+                      image.seek(frame)
+                      duration += image.info.get("duration", 0)
+                  assert duration >= 15_000, (name, duration)
           PY
