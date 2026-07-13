@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Animated terminal pets for Kitty on Linux. They follow your cursor, react to commands, and leave your keyboard input alone.">
+  <meta name="keywords" content="Kitty terminal, terminal pets, Linux, animated terminal, Codex pets, pixel art">
+  <meta property="og:title" content="Kitty Terminal Pets">
+  <meta property="og:description" content="Tiny animated coworkers for Kitty—without the keyboard drama.">
+  <meta property="og:image" content="https://raw.githubusercontent.com/Soontosh/kitty-terminal-pets/main/demo/preview.png">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://soontosh.github.io/kitty-terminal-pets/">
+  <title>Kitty Terminal Pets</title>
+  <style>
+    :root { color-scheme: dark; --bg: #11111b; --panel: #181825; --text: #cdd6f4; --soft: #a6adc8; --mint: #a6e3a1; --blue: #89b4fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 80% 0, #1e2b2a, var(--bg) 42%); color: var(--text); font: 17px/1.65 system-ui, sans-serif; }
+    main { width: min(1040px, calc(100% - 32px)); margin: auto; padding: 72px 0; }
+    h1 { margin: 0; font-size: clamp(2.8rem, 8vw, 5.6rem); line-height: .95; letter-spacing: -.06em; }
+    h1 span { color: var(--mint); }
+    .lede { max-width: 720px; color: var(--soft); font-size: 1.25rem; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 52px; }
+    a.button { border-radius: 10px; padding: 11px 17px; background: var(--mint); color: #11111b; font-weight: 750; text-decoration: none; }
+    a.button.secondary { background: var(--panel); color: var(--blue); border: 1px solid #313244; }
+    .demo { width: 100%; border: 1px solid #313244; border-radius: 16px; box-shadow: 0 24px 70px #0008; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 48px 0; }
+    .card { background: var(--panel); border: 1px solid #313244; border-radius: 14px; padding: 22px; }
+    .card h2 { margin-top: 0; font-size: 1.1rem; color: var(--mint); }
+    code { color: var(--mint); }
+    pre { overflow: auto; background: #0b0b12; border: 1px solid #313244; border-radius: 12px; padding: 17px; }
+    footer { color: var(--soft); margin-top: 50px; }
+    footer a { color: var(--blue); }
+    @media (max-width: 720px) { main { padding-top: 45px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Kitty Terminal <span>Pets.</span></h1>
+    <p class="lede">Tiny animated coworkers that follow your command line and react when work starts or finishes. Built for Kitty on Linux, and carefully kept away from your keyboard input.</p>
+    <div class="buttons">
+      <a class="button" href="https://github.com/Soontosh/kitty-terminal-pets#install">Get the pet</a>
+      <a class="button secondary" href="https://github.com/Soontosh/kitty-terminal-pets">Browse the code</a>
+    </div>
+    <img class="demo" src="https://raw.githubusercontent.com/Soontosh/kitty-terminal-pets/main/demo/kitty-terminal-pets.gif" alt="A Byte Cat pet following the command line inside Kitty terminal">
+    <section class="grid">
+      <article class="card"><h2>Stays out of the way</h2><p>No shell traps, no TTY readers, and no per-keystroke hooks. Your terminal remains your terminal.</p></article>
+      <article class="card"><h2>Shares your Petdex</h2><p>It finds pets in <code>~/.codex/pets</code>, plus its own neutral pet folder.</p></article>
+      <article class="card"><h2>Works out of the box</h2><p>Byte Cat is included, and the installer handles the config, private environment, and user service.</p></article>
+    </section>
+    <h2>One command, then one Kitty restart.</h2>
+    <pre><code>bash &lt;(curl -fsSL https://raw.githubusercontent.com/Soontosh/kitty-terminal-pets/main/install.sh)</code></pre>
+    <footer>MIT licensed. Made with an arguably unreasonable amount of care for terminal ergonomics. <a href="https://github.com/Soontosh/kitty-terminal-pets/blob/main/docs/SETUP.md">Read the full setup guide.</a></footer>
+  </main>
+</body>
+</html>

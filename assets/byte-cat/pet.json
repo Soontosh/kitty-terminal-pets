@@ -1,0 +1,6 @@
+{
+  "id": "byte-cat",
+  "displayName": "Byte Cat",
+  "description": "A tiny mint-green terminal cat bundled as the friendly starter pet.",
+  "spritesheetPath": "spritesheet.webp"
+}

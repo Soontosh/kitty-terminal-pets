@@ -1,0 +1,16 @@
+name: Pet idea
+description: Suggest an improvement, integration, or delightfully unnecessary feature.
+title: "[Idea] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What's the idea?
+      description: Tell us what would make the project more useful or more fun.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Why would it help?

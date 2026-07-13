@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: |
+          python -m pip install 'Pillow>=10,<13'
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+      - name: Run unit and install tests
+        run: bash tests/smoke.sh
+      - name: Check shell scripts
+        run: shellcheck install.sh uninstall.sh tests/smoke.sh
+      - name: Rebuild and validate demo assets
+        run: |
+          python demo/generate_assets.py
+          python - <<'PY'
+          from pathlib import Path
+          from PIL import Image
+
+          expected = {
+              "assets/byte-cat/spritesheet.webp": (1536, 1872),
+              "demo/kitty-terminal-pets.gif": (960, 540),
+              "demo/preview.png": (960, 540),
+          }
+          for name, size in expected.items():
+              path = Path(name)
+              assert path.is_file(), name
+              with Image.open(path) as image:
+                  assert image.size == size, (name, image.size)
+          PY

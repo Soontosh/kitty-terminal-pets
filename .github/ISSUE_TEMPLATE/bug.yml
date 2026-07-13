@@ -1,0 +1,38 @@
+name: Something went sideways
+description: Report a bug or a terminal interaction that feels off.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping make the pets less mischievous.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can we reproduce it?
+      placeholder: "1. Open Kitty…\n2. Run…"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Useful diagnostics
+      description: Paste `kitty --version`, `kitty-pet status`, and `systemctl --user status kitty-pet` here. Please remove anything private.
+      render: shell
+  - type: dropdown
+    id: input
+    attributes:
+      label: Did it affect keyboard input?
+      options:
+        - No
+        - Yes
+        - Not sure
+    validations:
+      required: true

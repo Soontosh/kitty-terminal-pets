@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://soontosh.github.io/kitty-terminal-pets/sitemap.xml
