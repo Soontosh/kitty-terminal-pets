@@ -12,7 +12,7 @@ Pet and command state stay on the local machine. The project has no telemetry.
 
 ## Reporting a vulnerability
 
-Please use GitHub's private vulnerability reporting for this repository rather than opening a public issue with exploit details. Include the Kitty version, Linux distribution, and the smallest reproduction you can share.
+Please use GitHub's private vulnerability reporting for this repository rather than opening a public issue with exploit details. Include the Kitty version, Linux distribution or macOS version, and the smallest reproduction you can share.
 
 ## Third-party pets
 

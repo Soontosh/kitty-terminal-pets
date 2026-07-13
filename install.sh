@@ -15,6 +15,12 @@ if [[ ! -f "$ROOT/src/kitty_pet.py" ]]; then
 fi
 
 HOME=${HOME:?HOME is not set}
+PLATFORM=${KITTY_PET_PLATFORM:-$(uname -s)}
+case "$PLATFORM" in
+    Linux) SERVICE_MANAGER=systemd ;;
+    Darwin) SERVICE_MANAGER=launchd ;;
+    *) printf 'kitty-pet: only Linux and macOS are supported (found %s)\n' "$PLATFORM" >&2; exit 1 ;;
+esac
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
 DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 BIN_DIR=${KITTY_PET_BIN_DIR:-$HOME/.local/bin}
@@ -24,7 +30,15 @@ CONFIG_DIR="$CONFIG_HOME/kitty-pet"
 KITTY_DIR="$CONFIG_HOME/kitty"
 KITTY_CONFIG="$KITTY_DIR/kitty.conf"
 SYSTEMD_DIR="$CONFIG_HOME/systemd/user"
-SERVICE_FILE="$SYSTEMD_DIR/kitty-pet.service"
+LAUNCHD_DIR="$HOME/Library/LaunchAgents"
+LAUNCHD_LABEL="io.github.soontosh.kitty-terminal-pets"
+LOG_DIR="$HOME/Library/Logs/KittyTerminalPets"
+if [[ $SERVICE_MANAGER == systemd ]]; then
+    SERVICE_FILE="$SYSTEMD_DIR/kitty-pet.service"
+else
+    SERVICE_FILE="$LAUNCHD_DIR/$LAUNCHD_LABEL.plist"
+fi
+SOCKET_DIR=${KITTY_PET_SOCKET_DIR:-${XDG_RUNTIME_DIR:-/tmp/kitty-pet-$(id -u)}}
 SKIP_SERVICE=${KITTY_PET_SKIP_SERVICE:-0}
 SKIP_RELOAD=${KITTY_PET_SKIP_RELOAD:-0}
 
@@ -32,16 +46,39 @@ say() { printf '\033[1;36mkitty-pet:\033[0m %s\n' "$*"; }
 die() { printf 'kitty-pet: %s\n' "$*" >&2; exit 1; }
 
 command -v python3 >/dev/null 2>&1 || die "Python 3.10+ is required"
-command -v kitty >/dev/null 2>&1 || die "Kitty is required: https://sw.kovidgoyal.net/kitty/"
 python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' || die "Python 3.10+ is required"
 
-mkdir -p "$APP_DIR" "$PET_ROOT/byte-cat" "$CONFIG_DIR" "$KITTY_DIR" "$BIN_DIR" "$SYSTEMD_DIR"
+KITTY_BIN=${KITTY_PET_KITTY_BIN:-}
+if [[ -z $KITTY_BIN ]] && command -v kitty >/dev/null 2>&1; then
+    KITTY_BIN=$(command -v kitty)
+fi
+if [[ -z $KITTY_BIN && $SERVICE_MANAGER == launchd ]]; then
+    for candidate in \
+        /Applications/kitty.app/Contents/MacOS/kitty \
+        "$HOME/Applications/kitty.app/Contents/MacOS/kitty"; do
+        if [[ -x $candidate ]]; then
+            KITTY_BIN=$candidate
+            break
+        fi
+    done
+fi
+[[ -n $KITTY_BIN && -x $KITTY_BIN ]] || die "Kitty is required: https://sw.kovidgoyal.net/kitty/binary/"
+
+mkdir -p "$APP_DIR" "$PET_ROOT/byte-cat" "$CONFIG_DIR" "$KITTY_DIR" "$BIN_DIR" "$SOCKET_DIR"
+chmod 700 "$SOCKET_DIR"
+if [[ $SERVICE_MANAGER == systemd ]]; then
+    mkdir -p "$SYSTEMD_DIR"
+else
+    mkdir -p "$LAUNCHD_DIR" "$LOG_DIR"
+fi
 
 if [[ -x "$BIN_DIR/kitty-pet" ]]; then
     "$BIN_DIR/kitty-pet" close >/dev/null 2>&1 || true
 fi
-if [[ $SKIP_SERVICE != 1 ]] && command -v systemctl >/dev/null 2>&1; then
+if [[ $SKIP_SERVICE != 1 && $SERVICE_MANAGER == systemd ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl --user stop kitty-pet.service >/dev/null 2>&1 || true
+elif [[ $SKIP_SERVICE != 1 && $SERVICE_MANAGER == launchd ]] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)" "$SERVICE_FILE" >/dev/null 2>&1 || true
 fi
 
 say "Installing the app"
@@ -60,7 +97,8 @@ fi
 "$APP_DIR/venv/bin/python" -m compileall -q "$APP_DIR/kitty_pet.py"
 
 wrapper=$(mktemp)
-printf '#!/usr/bin/env bash\nset -euo pipefail\nexec %q %q "$@"\n' \
+printf '#!/usr/bin/env bash\nset -euo pipefail\nexport KITTY_PET_BIN=%q\nexport KITTY_PET_KITTY_BIN=%q\nexport KITTY_PET_SOCKET_DIR=%q\nexec %q %q "$@"\n' \
+    "$BIN_DIR/kitty-pet" "$KITTY_BIN" "$SOCKET_DIR" \
     "$APP_DIR/venv/bin/python" "$APP_DIR/kitty_pet.py" > "$wrapper"
 install -m 0755 "$wrapper" "$BIN_DIR/kitty-pet"
 rm -f "$wrapper"
@@ -108,19 +146,22 @@ if [[ -f "$KITTY_CONFIG" ]]; then
 else
     : > "$KITTY_CONFIG"
 fi
-KITTY_PET_KITTY_CONFIG="$KITTY_CONFIG" KITTY_PET_BIN="$BIN_DIR/kitty-pet" python3 - <<'PY'
-import os, re
+KITTY_PET_KITTY_CONFIG="$KITTY_CONFIG" KITTY_PET_BIN="$BIN_DIR/kitty-pet" KITTY_PET_SOCKET_DIR="$SOCKET_DIR" python3 - <<'PY'
+import os, re, shlex
 from pathlib import Path
 
 path = Path(os.environ["KITTY_PET_KITTY_CONFIG"])
-binary = os.environ["KITTY_PET_BIN"]
+binary = shlex.quote(os.environ["KITTY_PET_BIN"])
+socket_dir = os.environ["KITTY_PET_SOCKET_DIR"]
+if any(character in socket_dir for character in "\n\r"):
+    raise SystemExit("kitty-pet: invalid socket directory")
 text = path.read_text()
 for name in ("kitty-pet", "kitty-pet-safe", "kitty-terminal-pets"):
     text = re.sub(rf"\n?# >>> {re.escape(name)} >>>.*?# <<< {re.escape(name)} <<<\n?", "\n", text, flags=re.S)
 block = f'''# >>> kitty-terminal-pets >>>
 # Local Unix sockets only: pet management never shares the keyboard TTY.
 allow_remote_control socket-only
-listen_on unix:${{XDG_RUNTIME_DIR}}/kitty-pet-{{kitty_pid}}.sock
+listen_on unix:{socket_dir}/kitty-pet-{{kitty_pid}}.sock
 
 # Borderless internal rail; native OS window decorations are untouched.
 window_border_width 0
@@ -134,7 +175,8 @@ map ctrl+shift+f7 launch --type=background {binary} toggle
 path.write_text(text.rstrip() + "\n\n" + block)
 PY
 
-cat > "$SERVICE_FILE" <<EOF
+if [[ $SERVICE_MANAGER == systemd ]]; then
+    cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Kitty Terminal Pets socket controller
 Documentation=https://github.com/Soontosh/kitty-terminal-pets
@@ -152,20 +194,60 @@ IOSchedulingClass=idle
 [Install]
 WantedBy=default.target
 EOF
+else
+    KITTY_PET_PLIST="$SERVICE_FILE" \
+    KITTY_PET_LABEL="$LAUNCHD_LABEL" \
+    KITTY_PET_BIN="$BIN_DIR/kitty-pet" \
+    KITTY_PET_LOG_DIR="$LOG_DIR" \
+    python3 - <<'PY'
+import os
+import plistlib
+from pathlib import Path
+
+path = Path(os.environ["KITTY_PET_PLIST"])
+log_dir = Path(os.environ["KITTY_PET_LOG_DIR"])
+value = {
+    "Label": os.environ["KITTY_PET_LABEL"],
+    "ProgramArguments": [os.environ["KITTY_PET_BIN"], "controller"],
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 2,
+    "ProcessType": "Background",
+    "LowPriorityIO": True,
+    "Nice": 10,
+    "StandardOutPath": str(log_dir / "controller.log"),
+    "StandardErrorPath": str(log_dir / "controller-error.log"),
+}
+with path.open("wb") as handle:
+    plistlib.dump(value, handle, sort_keys=False)
+PY
+    chmod 600 "$SERVICE_FILE"
+fi
 
 "$BIN_DIR/kitty-pet" self-test
 
 if [[ $SKIP_SERVICE != 1 ]]; then
-    command -v systemctl >/dev/null 2>&1 || die "systemd user services are required"
-    systemctl --user daemon-reload
-    systemctl --user enable --now kitty-pet.service
+    if [[ $SERVICE_MANAGER == systemd ]]; then
+        command -v systemctl >/dev/null 2>&1 || die "systemd user services are required on Linux"
+        systemctl --user daemon-reload
+        systemctl --user enable --now kitty-pet.service
+    else
+        command -v launchctl >/dev/null 2>&1 || die "launchd is required on macOS"
+        domain="gui/$(id -u)"
+        launchctl enable "$domain/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
+        launchctl bootstrap "$domain" "$SERVICE_FILE" || die "could not start the launch agent; run the installer from your logged-in macOS desktop"
+    fi
 fi
 
 if [[ $SKIP_RELOAD != 1 ]]; then
-    for pid in $(pgrep -x kitty 2>/dev/null || true); do
+    for pid in $(pgrep -f '(^|/)kitty( |$)|kitty.app/Contents/MacOS/kitty' 2>/dev/null || true); do
         kill -USR1 "$pid" 2>/dev/null || true
     done
 fi
 
 say "Installed! Fully quit and reopen Kitty once so its local socket is created."
 say "Then run: kitty-pet select"
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) say "$BIN_DIR is not on PATH; use $BIN_DIR/kitty-pet or add that directory to your shell PATH." ;;
+esac

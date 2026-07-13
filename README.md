@@ -4,7 +4,7 @@ Animated little coworkers for the [Kitty terminal](https://sw.kovidgoyal.net/kit
 
 [![CI](https://github.com/Soontosh/kitty-terminal-pets/actions/workflows/ci.yml/badge.svg)](https://github.com/Soontosh/kitty-terminal-pets/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-89b4fa.svg)](LICENSE)
-[![Linux](https://img.shields.io/badge/platform-Linux-a6e3a1.svg)](#requirements)
+[![Linux + macOS](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-a6e3a1.svg)](#requirements)
 
 [Project page](https://soontosh.github.io/kitty-terminal-pets/) · [Setup guide](docs/SETUP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
@@ -14,7 +14,7 @@ Animated little coworkers for the [Kitty terminal](https://sw.kovidgoyal.net/kit
 
 ![Killua animated terminal pet in a riced Kitty terminal on Linux](demo/killua-riced-kitty.gif)
 
-Killua absolutely stealing the show in the setup this project was born in. This is a privacy-safe live capture of the real Kitty theme, layout, and pet renderer—not a UI mockup.
+Killua absolutely stealing the show in the setup this project was born in. The loop follows a complete terminal session: boot, slow typing, running, success, and failure. This is a privacy-safe live capture of the real Kitty theme, layout, and pet renderer—not a UI mockup.
 
 > Killua is a locally installed Petdex pet shown here for demonstration. Its character artwork and pet files are not distributed by this repository.
 
@@ -33,7 +33,7 @@ Byte Cat is the original starter pet included with every fresh install.
 - Uses a local Unix socket, not a Bash `DEBUG` trap or a process fighting Readline for the TTY.
 - Does not trigger “python3 is still running” when the pet is the only thing left to close.
 - Leaves real close warnings in place for real commands.
-- Sleeps in Linux `inotify` while nothing changes—idle panes do no polling or Petdex rescans.
+- Sleeps in Linux `inotify` or macOS `kqueue` while nothing changes—idle panes do no polling or Petdex rescans.
 
 ## Install
 
@@ -58,7 +58,13 @@ Then **fully quit and reopen Kitty once**, and pick a pet:
 kitty-pet select
 ```
 
-That is the whole setup. The installer creates an isolated Python environment, adds one marked block to `kitty.conf`, starts a low-priority user service, and runs its own asset test.
+That is the whole setup. The installer creates an isolated Python environment, adds one marked block to `kitty.conf`, starts a low-priority user service through systemd (Linux) or launchd (macOS), and runs its own asset test.
+
+On macOS, the installer finds Kitty in `/Applications/kitty.app` automatically. If `~/.local/bin` is not already on your shell `PATH`, add this once so `kitty-pet` is available from new shells:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
+```
 
 ## Everyday commands
 
@@ -104,11 +110,11 @@ A live stress check pushed 16,384 raw characters and 250 commands through a mana
 
 ## Requirements
 
-- Linux with systemd user services
-- Kitty 0.36 or newer
+- Linux with systemd user services, or macOS with launchd
+- Kitty 0.36 or newer (the standard `/Applications/kitty.app` install works on macOS)
 - Python 3.10 or newer
 - `git` for the one-line bootstrap
-- A graphical Kitty session (Wayland and X11 are both fine)
+- A graphical Kitty session (Wayland, X11, and native macOS are supported)
 
 Pillow is installed into the app's private virtual environment automatically.
 
@@ -190,7 +196,15 @@ The uninstaller removes only the marked Kitty config block. It does not touch un
 - [Security notes](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
-If something is weird, an issue with `kitty --version`, `kitty-pet status`, and `systemctl --user status kitty-pet` is wildly helpful.
+If something is weird, an issue with your OS version, Kitty version, `kitty-pet status`, and the relevant service status is wildly helpful:
+
+```bash
+# Linux
+systemctl --user status kitty-pet
+
+# macOS
+launchctl print "gui/$(id -u)/io.github.soontosh.kitty-terminal-pets"
+```
 
 ## License
 
