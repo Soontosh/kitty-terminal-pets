@@ -89,6 +89,7 @@ config.setdefault("pane_percent", 13)
 config.setdefault("pet_rows", 7)
 config.setdefault("cursor_offset_rows", 1)
 config.setdefault("completion_seconds", 2.5)
+config.setdefault("timings", {})
 path.parent.mkdir(parents=True, exist_ok=True)
 fd, raw = tempfile.mkstemp(prefix=".config.", dir=path.parent)
 with os.fdopen(fd, "w") as handle:

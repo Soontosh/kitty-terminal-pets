@@ -52,6 +52,7 @@ That is the whole setup. The installer creates an isolated Python environment, a
 | `kitty-pet select` | Pick from the shared pet list |
 | `kitty-pet select killua` | Pick directly by ID |
 | `kitty-pet list` | Show every discovered pet |
+| `kitty-pet timing` | Show the selected pet's exact timing |
 | `kitty-pet status` | Show selection and state |
 | `kitty-pet disable` | Hide/close pet rails |
 | `kitty-pet enable` | Bring them back |
@@ -114,6 +115,30 @@ Edit `~/.config/kitty-pet/config.json`:
 
 The service notices changes automatically.
 
+## Tune every little beat
+
+Timing can be global, per state, per pet, or per frame. Changes are live—no service or Kitty restart needed.
+
+```bash
+# Make every animation 25% slower.
+kitty-pet timing all all --speed 0.75
+
+# Give Killua's working animation a relaxed 4 FPS.
+kitty-pet timing killua running --fps 4
+
+# Hold Killua's success pose for 8 seconds.
+kitty-pet timing killua success --display-seconds 8
+
+# Set the duration of all six running frames, in milliseconds.
+kitty-pet timing killua running --frame-ms 100,100,140,100,100,300
+
+# See the resolved result or remove just this override.
+kitty-pet timing killua
+kitty-pet timing killua running --reset
+```
+
+`speed` accepts `0.05`–`20`, FPS accepts `0.1`–`60`, individual frames accept `17`–`60000` ms, and completion poses can remain visible for up to 24 hours. Running and idle durations remain task-driven, so a cosmetic setting cannot keep the working state alive after a command finishes. See the [full timing guide](docs/TIMING.md) for precedence and direct JSON configuration.
+
 ## Uninstall
 
 From the cloned repository:
@@ -134,6 +159,7 @@ The uninstaller removes only the marked Kitty config block. It does not touch un
 
 - [Full setup guide](docs/SETUP.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Timing customization](docs/TIMING.md)
 - [Security notes](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
