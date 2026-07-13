@@ -3,12 +3,16 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
+
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,10 +51,26 @@ class PetTests(unittest.TestCase):
         target = kitty_pet.build_animation(pet, "running")
         self.assertTrue(target.is_file())
 
-        with kitty_pet.Image.open(target) as animation:
+        with Image.open(target) as animation:
             self.assertEqual((192, 208), animation.size)
             self.assertEqual(6, animation.n_frames)
             self.assertEqual(0, animation.info.get("loop"))
+
+    def test_cache_miss_builds_outside_the_long_lived_renderer(self) -> None:
+        pet = kitty_pet.discover_pets(self.config())["byte-cat"]
+        target = Path(TEMP_ROOT.name) / "worker-cache.webp"
+
+        def worker(*_args, **_kwargs) -> subprocess.CompletedProcess:
+            target.touch()
+            return subprocess.CompletedProcess([], 0)
+
+        with (
+            mock.patch.object(kitty_pet, "animation_target", return_value=target),
+            mock.patch.object(subprocess, "run", side_effect=worker) as run,
+        ):
+            result = kitty_pet.cached_animation(pet, "running", self.config())
+        self.assertEqual(target, result)
+        self.assertIn("prepare", run.call_args.args[0])
 
     def test_timing_overrides_resolve_down_to_each_frame(self) -> None:
         pet = kitty_pet.discover_pets(self.config())["byte-cat"]
@@ -144,7 +164,7 @@ class PetTests(unittest.TestCase):
         self.assertEqual("idle", kitty_pet.read_position(target)["state"])
 
     def test_sprite_atlas_has_expected_dimensions(self) -> None:
-        with kitty_pet.Image.open(ROOT / "assets" / "byte-cat" / "spritesheet.webp") as sheet:
+        with Image.open(ROOT / "assets" / "byte-cat" / "spritesheet.webp") as sheet:
             self.assertEqual((1536, 1872), sheet.size)
 
     def test_pet_tracks_cursor_without_overflow(self) -> None:
@@ -178,6 +198,93 @@ class PetTests(unittest.TestCase):
         with redirect_stdout(output):
             kitty_pet.mark_renderer_idle()
         self.assertEqual("\x1b]133;A\x1b\\", output.getvalue())
+
+    def test_linux_file_waiter_wakes_for_atomic_replacement(self) -> None:
+        target = Path(TEMP_ROOT.name) / "events" / "state.json"
+        target.parent.mkdir(exist_ok=True)
+        waiter = kitty_pet.FileEventWaiter()
+        try:
+            if not waiter.event_driven:
+                self.skipTest("inotify is unavailable")
+            waiter.watch({target})
+            kitty_pet.atomic_json(target, {"state": "running"})
+            started = time.perf_counter()
+            waiter.wait({target}, timeout=1)
+            self.assertLess(time.perf_counter() - started, 0.5)
+        finally:
+            waiter.close()
+
+    def test_unchanged_tab_state_does_not_rewrite_position_file(self) -> None:
+        existing = {
+            "row": 30,
+            "column": 1,
+            "source_lines": 30,
+            "state": "idle",
+            "busy": False,
+            "completion_until": 0.0,
+            "completed_at": 0.0,
+        }
+        window = {"id": 9, "lines": 30, "at_prompt": True, "last_cmd_exit_status": 0}
+        with (
+            mock.patch.object(kitty_pet, "read_position", return_value=existing.copy()),
+            mock.patch.object(kitty_pet, "atomic_json") as write,
+        ):
+            kitty_pet.update_tab_status(
+                Path("/tmp/fake.sock"), {"id": 7}, window, [window], self.config(), False
+            )
+        write.assert_not_called()
+
+    def test_cursor_query_is_frozen_after_a_command_starts(self) -> None:
+        existing = {
+            "row": 10,
+            "column": 1,
+            "source_lines": 30,
+            "state": "running",
+            "busy": True,
+            "completion_until": 0.0,
+            "completed_at": 0.0,
+        }
+        window = {
+            "id": 9,
+            "lines": 30,
+            "at_prompt": False,
+            "foreground_processes": [{"cmdline": ["sleep", "20"]}],
+        }
+        with (
+            mock.patch.object(kitty_pet, "read_position", return_value=existing),
+            mock.patch.object(kitty_pet, "cursor_position") as cursor,
+            mock.patch.object(kitty_pet, "atomic_json"),
+        ):
+            kitty_pet.update_tab_status(
+                Path("/tmp/fake.sock"), {"id": 7}, window, [window], self.config(), True
+            )
+        cursor.assert_not_called()
+
+    def test_direct_socket_launch_avoids_kitty_cli_process(self) -> None:
+        calls: list[tuple[str, dict]] = []
+
+        def socket_call(_socket: Path, command: str, payload: dict) -> tuple[bool, object]:
+            calls.append((command, payload))
+            return True, None
+
+        tab = {"id": 7, "layout": "splits", "windows": [{"id": 9}]}
+        with (
+            mock.patch.object(kitty_pet, "kitty_socket_call", side_effect=socket_call),
+            mock.patch.object(kitty_pet, "kitty_socket_command") as cli,
+        ):
+            result = kitty_pet.launch_pane(
+                Path("/tmp/fake.sock"), tab, {"id": 9}, self.config(), Path("/tmp/position.json")
+            )
+        self.assertEqual(0, result)
+        self.assertEqual("launch", calls[-1][0])
+        self.assertTrue(calls[-1][1]["keep_focus"])
+        cli.assert_not_called()
+
+    def test_startup_delay_is_bounded_and_non_blocking(self) -> None:
+        config = {**self.config(), "startup_delay_seconds": 0.75}
+        with mock.patch.object(kitty_pet.time, "time_ns", return_value=2_000_000_000):
+            self.assertFalse(kitty_pet.ready_to_launch_pane({"created_at": 1_500_000_000}, config))
+            self.assertTrue(kitty_pet.ready_to_launch_pane({"created_at": 1_000_000_000}, config))
 
 
 if __name__ == "__main__":

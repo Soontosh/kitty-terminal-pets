@@ -3,25 +3,15 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
-import re
 import signal
-import socket as socket_lib
-import subprocess
 import sys
-import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-from PIL import Image
-
-
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "kitty-pet"
@@ -41,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pet_rows": 7,
     "cursor_offset_rows": 1,
     "completion_seconds": 2.5,
+    "controller_poll_seconds": 1.0,
+    "startup_delay_seconds": 0.75,
     "timings": {},
 }
 
@@ -63,15 +55,151 @@ class PetError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
+def file_signature(path: Path) -> tuple[int, int, int] | None:
+    """Return a cheap signature that also notices atomic file replacement."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_ino, stat.st_mtime_ns, stat.st_size
+
+
+class FileEventWaiter:
+    """Sleep until watched files change, with a polling fallback off Linux."""
+
+    _WATCH_MASK = 0x0004 | 0x0008 | 0x0080 | 0x0100 | 0x0200 | 0x0400 | 0x0800
+    _OVERFLOW = 0x4000
+
+    def __init__(self) -> None:
+        self.fd = -1
+        self.wake_read = -1
+        self.wake_write = -1
+        self.previous_wakeup = -1
+        self.previous_winch: Any = None
+        self.directories: dict[int, Path] = {}
+        self.watched: set[Path] = set()
+        self.poller: Any = None
+        if not sys.platform.startswith("linux"):
+            return
+        try:
+            import ctypes
+            import select
+            import struct
+
+            self._event = struct.Struct("iIII")
+            self._pollin = select.POLLIN
+            libc = ctypes.CDLL(None, use_errno=True)
+            init = libc.inotify_init1
+            init.argtypes = [ctypes.c_int]
+            init.restype = ctypes.c_int
+            self._add_watch = libc.inotify_add_watch
+            self._add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+            self._add_watch.restype = ctypes.c_int
+            self.fd = init(os.O_NONBLOCK | os.O_CLOEXEC)
+            if self.fd < 0:
+                return
+            self.wake_read, self.wake_write = os.pipe2(os.O_NONBLOCK | os.O_CLOEXEC)
+            self.previous_wakeup = signal.set_wakeup_fd(self.wake_write)
+            self.previous_winch = signal.getsignal(signal.SIGWINCH)
+            signal.signal(signal.SIGWINCH, lambda *_: None)
+            self.poller = select.poll()
+            self.poller.register(self.fd, self._pollin)
+            self.poller.register(self.wake_read, self._pollin)
+        except (AttributeError, OSError):
+            self.close()
+
+    @property
+    def event_driven(self) -> bool:
+        return self.poller is not None
+
+    def close(self) -> None:
+        if self.wake_write >= 0:
+            try:
+                signal.set_wakeup_fd(self.previous_wakeup)
+            except (ValueError, OSError):
+                pass
+            if self.previous_winch is not None:
+                signal.signal(signal.SIGWINCH, self.previous_winch)
+        for fd in (self.fd, self.wake_read, self.wake_write):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self.fd = self.wake_read = self.wake_write = -1
+        self.poller = None
+
+    def watch(self, paths: set[Path]) -> None:
+        if not self.event_driven:
+            return
+        for directory in {path.parent for path in paths} - self.watched:
+            try:
+                wd = self._add_watch(self.fd, os.fsencode(directory), self._WATCH_MASK)
+            except (AttributeError, OSError):
+                continue
+            if wd >= 0:
+                self.directories[wd] = directory
+                self.watched.add(directory)
+
+    @staticmethod
+    def _drain(fd: int) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunks.append(os.read(fd, 65536))
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+        return b"".join(chunks)
+
+    def wait(self, paths: set[Path], timeout: float = 30.0) -> None:
+        if not self.event_driven:
+            time.sleep(min(timeout, 0.5))
+            return
+        self.watch(paths)
+        ready = self.poller.poll(max(0, round(timeout * 1000)))
+        for fd, _ in ready:
+            if fd == self.wake_read:
+                self._drain(fd)
+                return
+            if fd != self.fd:
+                continue
+            raw = self._drain(fd)
+            offset = 0
+            while offset + self._event.size <= len(raw):
+                wd, mask, _, length = self._event.unpack_from(raw, offset)
+                offset += self._event.size
+                name = raw[offset:offset + length].split(b"\0", 1)[0]
+                offset += length
+                if mask & self._OVERFLOW:
+                    return
+                directory = self.directories.get(wd)
+                changed = directory / os.fsdecode(name) if directory is not None and name else directory
+                if changed in paths or (changed is not None and changed.is_dir() and any(p.parent == changed for p in paths)):
+                    return
+
+
 class Pet:
-    pet_id: str
-    display_name: str
-    description: str
-    directory: Path
-    sheet: Path
-    frame: dict[str, int]
-    animations: dict[str, Any]
+    __slots__ = ("pet_id", "display_name", "description", "directory", "sheet", "frame", "animations")
+
+    def __init__(
+        self,
+        pet_id: str,
+        display_name: str,
+        description: str,
+        directory: Path,
+        sheet: Path,
+        frame: dict[str, int],
+        animations: dict[str, Any],
+    ) -> None:
+        self.pet_id = pet_id
+        self.display_name = display_name
+        self.description = description
+        self.directory = directory
+        self.sheet = sheet
+        self.frame = frame
+        self.animations = animations
 
 
 def ensure_dirs() -> None:
@@ -82,6 +210,8 @@ def ensure_dirs() -> None:
 
 
 def atomic_json(path: Path, value: Any, mode: int | None = None) -> None:
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     tmp = Path(raw)
@@ -240,53 +370,108 @@ def display_seconds(config: dict[str, Any], pet_id: str, state: str) -> float:
     return number_in_range(raw, "display_seconds", 0, 86400)
 
 
-def build_animation(pet: Pet, state: str, config: dict[str, Any] | None = None) -> Path:
+def animation_target(pet: Pet, state: str, config: dict[str, Any] | None = None) -> Path:
     frames, durations = animation_spec(pet, state, config)
     source_hash = hashlib.sha256()
-    source_hash.update(pet.sheet.read_bytes())
+    source_hash.update(os.fsencode(pet.sheet))
+    source_hash.update(json.dumps(file_signature(pet.sheet)).encode())
     source_hash.update(json.dumps([pet.frame, frames, durations], sort_keys=True).encode())
-    target = CACHE_DIR / pet.pet_id / f"{state}-{source_hash.hexdigest()[:16]}.webp"
+    return CACHE_DIR / pet.pet_id / f"{state}-{source_hash.hexdigest()[:16]}.webp"
+
+
+def build_animation(pet: Pet, state: str, config: dict[str, Any] | None = None) -> Path:
+    import fcntl
+    import tempfile
+
+    frames, durations = animation_spec(pet, state, config)
+    target = animation_target(pet, state, config)
     if target.is_file():
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    with Image.open(pet.sheet) as sheet:
-        width = pet.frame["width"]
-        height = pet.frame["height"]
-        columns = pet.frame["columns"]
-        rows = pet.frame["rows"]
-        expected = (width * columns, height * rows)
-        if sheet.size != expected:
-            raise PetError(f"{pet.sheet} is {sheet.size[0]}x{sheet.size[1]}, expected {expected[0]}x{expected[1]}")
-        limit = columns * rows
-        images: list[Image.Image] = []
-        for index in frames:
-            if not 0 <= index < limit:
-                raise PetError(f"animation {state} references frame {index}, but {pet.pet_id} has {limit} frames")
-            x = (index % columns) * width
-            y = (index // columns) * height
-            images.append(sheet.crop((x, y, x + width, y + height)).convert("RGBA"))
+    lock_path = target.parent / ".build.lock"
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if target.is_file():
+            return target
 
-    fd, raw = tempfile.mkstemp(prefix=".animation-", suffix=".webp", dir=target.parent)
-    os.close(fd)
-    tmp = Path(raw)
-    try:
-        images[0].save(
-            tmp,
-            format="WEBP",
-            save_all=True,
-            append_images=images[1:],
-            duration=durations,
-            loop=0,
-            lossless=True,
-            method=4,
-        )
-        os.replace(tmp, target)
-    finally:
-        tmp.unlink(missing_ok=True)
-        for image in images:
-            image.close()
+        from PIL import Image
+
+        with Image.open(pet.sheet) as sheet:
+            width = pet.frame["width"]
+            height = pet.frame["height"]
+            columns = pet.frame["columns"]
+            rows = pet.frame["rows"]
+            expected = (width * columns, height * rows)
+            if sheet.size != expected:
+                raise PetError(
+                    f"{pet.sheet} is {sheet.size[0]}x{sheet.size[1]}, expected {expected[0]}x{expected[1]}"
+                )
+            limit = columns * rows
+            images: list[Any] = []
+            for index in frames:
+                if not 0 <= index < limit:
+                    raise PetError(f"animation {state} references frame {index}, but {pet.pet_id} has {limit} frames")
+                x = (index % columns) * width
+                y = (index // columns) * height
+                images.append(sheet.crop((x, y, x + width, y + height)).convert("RGBA"))
+
+        fd, raw = tempfile.mkstemp(prefix=".animation-", suffix=".webp", dir=target.parent)
+        os.close(fd)
+        tmp = Path(raw)
+        try:
+            images[0].save(
+                tmp,
+                format="WEBP",
+                save_all=True,
+                append_images=images[1:],
+                duration=durations,
+                loop=0,
+                lossless=True,
+                method=4,
+            )
+            os.replace(tmp, target)
+        finally:
+            tmp.unlink(missing_ok=True)
+            for image in images:
+                image.close()
     return target
+
+
+def prepare_animation(state: str) -> int:
+    if state not in ANIMATION_STATES:
+        raise PetError(f"unknown animation state: {state}")
+    config = load_config()
+    build_animation(selected_pet(config), state, config)
+    return 0
+
+
+def cached_animation(pet: Pet, state: str, config: dict[str, Any]) -> Path:
+    """Build missing cache data out-of-process so renderers never retain Pillow."""
+    import subprocess
+
+    target = animation_target(pet, state, config)
+    if target.is_file():
+        return target
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), "prepare", state],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+        timeout=60,
+    )
+    if result.returncode == 0 and target.is_file():
+        return target
+    # Config can be atomically replaced while a worker is starting. In that
+    # case it correctly builds the new selection/timing; use it for this frame
+    # and let the already queued config event refresh the renderer's metadata.
+    current_config = load_config()
+    current_pet = selected_pet(current_config)
+    current_target = animation_target(current_pet, state, current_config)
+    if result.returncode != 0 or not current_target.is_file():
+        raise PetError(f"could not prepare {pet.pet_id} {state} animation")
+    return current_target
 
 
 def pid_alive(pid: int) -> bool:
@@ -334,6 +519,8 @@ def write_state(kind: str, pid: int, exit_code: int = 0) -> None:
 
 def kitty_socket_command(socket: Path, *args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
     """Run a Kitty command over a Unix socket, never through a terminal TTY."""
+    import subprocess
+
     command = ["kitty", "@", f"--to=unix:{socket}", *args]
     try:
         return subprocess.run(
@@ -349,11 +536,13 @@ def kitty_socket_command(socket: Path, *args: str, capture: bool = False) -> sub
         return subprocess.CompletedProcess(command, 124, stdout, stderr)
 
 
-def kitty_socket_request(socket: Path, command: str, payload: dict[str, Any]) -> str | None:
-    """Use Kitty's framed JSON protocol directly for frequent read-only queries."""
+def kitty_socket_call(socket: Path, command: str, payload: dict[str, Any]) -> tuple[bool, Any]:
+    """Use Kitty's framed JSON protocol without spawning a CLI process."""
+    import socket as socket_lib
+
     request = {
         "cmd": command,
-        "version": [0, 26, 0],
+        "version": [0, 36, 0],
         "kitty_window_id": 0,
         "payload": payload,
     }
@@ -370,20 +559,25 @@ def kitty_socket_request(socket: Path, command: str, payload: dict[str, Any]) ->
                     break
                 raw.extend(chunk)
                 if len(raw) > 16 * 1024 * 1024:
-                    return None
+                    return False, None
     except (OSError, TimeoutError):
-        return None
+        return False, None
     prefix = b"\x1bP@kitty-cmd"
     if not raw.startswith(prefix) or not raw.endswith(b"\x1b\\"):
-        return None
+        return False, None
     try:
         response = json.loads(raw[len(prefix):-2])
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
+        return False, None
     if not isinstance(response, dict) or not response.get("ok"):
-        return None
-    data = response.get("data")
-    return data if isinstance(data, str) else None
+        return False, None
+    return True, response.get("data")
+
+
+def kitty_socket_request(socket: Path, command: str, payload: dict[str, Any]) -> str | None:
+    """Return text data from a direct Kitty socket request."""
+    ok, data = kitty_socket_call(socket, command, payload)
+    return data if ok and isinstance(data, str) else None
 
 
 def kitty_sockets() -> list[Path]:
@@ -398,6 +592,8 @@ def position_file(socket: Path, tab_id: int) -> Path:
 
 def cursor_position(socket: Path, window: dict[str, Any]) -> tuple[int, int] | None:
     """Read only cursor coordinates; screen contents are discarded immediately."""
+    import re
+
     output = kitty_socket_request(
         socket,
         "get-text",
@@ -430,14 +626,23 @@ def update_tab_status(
 ) -> Path:
     target = position_file(socket, int(tab["id"]))
     data = read_position(target)
-    coordinates = cursor_position(socket, source_window) if query_cursor else None
+    before = dict(data)
+    data.pop("updated_at", None)
+    busy = any(window_is_busy(window) for window in regular_windows)
+    was_busy = bool(data.get("busy", False))
+    # Capture placement at command start, then freeze it while output streams.
+    # Moving the same animation for every output row is visually noisy and
+    # forces needless graphics transfers through Kitty.
+    coordinates = (
+        cursor_position(socket, source_window)
+        if query_cursor and (not busy or not was_busy)
+        else None
+    )
     if coordinates is not None:
         row, column = coordinates
         data.update({"row": row, "column": column})
 
     now = time.time()
-    busy = any(window_is_busy(window) for window in regular_windows)
-    was_busy = bool(data.get("busy", False))
     if busy:
         state = "running"
         completion_until = 0.0
@@ -476,10 +681,10 @@ def update_tab_status(
             "busy": busy,
             "completion_until": completion_until,
             "completed_at": completed_at,
-            "updated_at": now,
         }
     )
-    atomic_json(target, data, 0o600)
+    if data != before:
+        atomic_json(target, data, 0o600)
     return target
 
 
@@ -492,9 +697,26 @@ def launch_pane(
 ) -> int:
     windows = tab.get("windows", [])
     tab_match = f"id:{tab['id']}"
-    if len(windows) == 1:
-        kitty_socket_command(socket, "goto-layout", "--match", tab_match, "splits")
+    if len(windows) == 1 and tab.get("layout") != "splits":
+        ok, _ = kitty_socket_call(socket, "goto-layout", {"match": tab_match, "layout": "splits"})
+        if not ok:
+            kitty_socket_command(socket, "goto-layout", "--match", tab_match, "splits")
     bias = max(8, min(25, int(config.get("pane_percent", 13))))
+    payload = {
+        "args": [str(HOME / ".local/bin/kitty-pet"), "render"],
+        "match": tab_match,
+        "source_window": f"id:{source_window['id']}",
+        "type": "window",
+        "location": "vsplit",
+        "bias": bias,
+        "keep_focus": True,
+        "copy_colors": True,
+        "spacing": ["padding=2"],
+        "env": ["KITTY_PET_PANE=1", f"KITTY_PET_POSITION_FILE={target_position}"],
+    }
+    ok, _ = kitty_socket_call(socket, "launch", payload)
+    if ok:
+        return 0
     result = kitty_socket_command(
         socket,
         "launch",
@@ -518,6 +740,11 @@ def launch_pane(
 def close_panes() -> int:
     result = 0
     for socket in kitty_sockets():
+        ok, _ = kitty_socket_call(
+            socket, "close-window", {"match": "env:KITTY_PET_PANE=1", "ignore_no_match": True}
+        )
+        if ok:
+            continue
         closed = kitty_socket_command(
             socket, "close-window", "--match", "env:KITTY_PET_PANE=1", "--ignore-no-match", capture=True
         )
@@ -543,9 +770,18 @@ def window_is_busy(window: dict[str, Any]) -> bool:
     return bool(window.get("in_alternate_screen"))
 
 
-def controller_iteration() -> None:
+def ready_to_launch_pane(window: dict[str, Any], config: dict[str, Any]) -> bool:
+    delay = max(0.0, min(10.0, float(config.get("startup_delay_seconds", 0.75))))
+    try:
+        age = (time.time_ns() - int(window["created_at"])) / 1_000_000_000
+    except (KeyError, TypeError, ValueError):
+        return True
+    return age >= delay
+
+
+def controller_iteration(config: dict[str, Any] | None = None) -> None:
     """Discover Kitty state over sockets and maintain one pane per tab."""
-    config = load_config()
+    config = config or load_config()
     enabled = bool(config.get("enabled", False))
     live_positions: set[Path] = set()
     for socket in kitty_sockets():
@@ -557,6 +793,7 @@ def controller_iteration() -> None:
         except json.JSONDecodeError:
             continue
         for os_window in os_windows if isinstance(os_windows, list) else []:
+            os_window_focused = bool(os_window.get("is_focused"))
             for tab in os_window.get("tabs", []):
                 windows = tab.get("windows", [])
                 panes = [window for window in windows if window.get("env", {}).get("KITTY_PET_PANE") == "1"]
@@ -573,35 +810,55 @@ def controller_iteration() -> None:
                         source_window,
                         regular,
                         config,
-                        bool(tab.get("is_active") or tab.get("is_focused")),
+                        os_window_focused and bool(tab.get("is_active") or tab.get("is_focused")),
                     )
                     live_positions.add(target_position)
-                if enabled and regular and not panes:
+                launch_source = source_window or (regular[0] if regular else None)
+                if enabled and launch_source is not None and not panes and ready_to_launch_pane(launch_source, config):
                     launch_pane(
                         socket,
                         tab,
-                        source_window or regular[0],
+                        launch_source,
                         config,
                         target_position or position_file(socket, int(tab["id"])),
                     )
                 elif (not enabled) or (panes and not regular):
                     for pane in panes:
-                        kitty_socket_command(
-                            socket, "close-window", "--match", f"id:{pane['id']}", "--ignore-no-match", capture=True
+                        ok, _ = kitty_socket_call(
+                            socket, "close-window", {"match": f"id:{pane['id']}", "ignore_no_match": True}
                         )
+                        if not ok:
+                            kitty_socket_command(
+                                socket,
+                                "close-window",
+                                "--match",
+                                f"id:{pane['id']}",
+                                "--ignore-no-match",
+                                capture=True,
+                            )
                     if not regular:
                         position_file(socket, int(tab["id"])).unlink(missing_ok=True)
 
     for path in POSITION_DIR.glob("*.json"):
         if path not in live_positions:
             path.unlink(missing_ok=True)
+
+
 def controller(once: bool = False) -> int:
     ensure_dirs()
+    sentinel = object()
+    config_stamp: object = sentinel
+    config: dict[str, Any] = {}
     while True:
-        controller_iteration()
+        stamp = file_signature(CONFIG_FILE)
+        if stamp != config_stamp:
+            config = load_config()
+            config_stamp = stamp
+        controller_iteration(config)
         if once:
             return 0
-        time.sleep(0.75)
+        interval = max(0.25, min(10.0, float(config.get("controller_poll_seconds", 1.0))))
+        time.sleep(interval)
 
 
 def render_geometry(config: dict[str, Any], position: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -621,6 +878,8 @@ def render_geometry(config: dict[str, Any], position: dict[str, Any]) -> tuple[i
 
 
 def draw_animation(path: Path, geometry: tuple[int, int, int, int]) -> None:
+    import subprocess
+
     columns, _, rows, top = geometry
     subprocess.run(["kitty", "+kitten", "icat", "--clear", "--silent"], check=False)
     sys.stdout.write("\033[2J\033[H")
@@ -628,7 +887,7 @@ def draw_animation(path: Path, geometry: tuple[int, int, int, int]) -> None:
     subprocess.run(
         [
             "kitty", "+kitten", "icat", "--align=center", f"--place={columns}x{rows}@0x{top}",
-            "--scale-up=no", "--loop=-1", "--transfer-mode=stream", str(path),
+            "--scale-up=no", "--loop=-1", "--transfer-mode=memory", str(path),
         ],
         check=False,
     )
@@ -643,33 +902,69 @@ def mark_renderer_idle() -> None:
 
 
 def render() -> int:
+    import subprocess
+
     if os.environ.get("TERM") != "xterm-kitty":
         raise PetError("the renderer must run inside Kitty")
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    ensure_dirs()
+    raw_position_path = os.environ.get("KITTY_PET_POSITION_FILE")
+    position_path = Path(raw_position_path) if raw_position_path else None
+    waiter = FileEventWaiter()
+    sentinel = object()
+    config_stamp: object = sentinel
+    position_stamp: object = sentinel
+    asset_stamp: object = sentinel
+    config: dict[str, Any] = {}
+    position: dict[str, Any] = {}
+    pet: Pet | None = None
     last_key: tuple[Any, ...] | None = None
-    while True:
-        config = load_config()
-        pet = selected_pet(config)
-        enabled = bool(config.get("enabled", True))
-        position_path = os.environ.get("KITTY_PET_POSITION_FILE")
-        position = read_position(Path(position_path)) if position_path else {}
-        state = str(position.get("state") or effective_state(config)) if enabled else "disabled"
-        geometry = render_geometry(config, position)
-        timing_key = json.dumps(timing_settings(config, pet.pet_id, state), sort_keys=True, default=str)
-        key = (pet.pet_id, state, enabled, geometry, timing_key)
-        if key != last_key:
-            if enabled:
-                animation = build_animation(pet, state, config)
-                sys.stdout.write(f"\033]2;Terminal Pet: {pet.display_name} ({state})\007")
-                sys.stdout.flush()
-                draw_animation(animation, geometry)
-                mark_renderer_idle()
-            else:
-                subprocess.run(["kitty", "+kitten", "icat", "--clear", "--silent"], check=False)
-                sys.stdout.write("\033[2J\033[H\033]2;Terminal Pet: paused\007")
-                mark_renderer_idle()
-            last_key = key
-        time.sleep(0.2)
+    try:
+        while True:
+            current_config_stamp = file_signature(CONFIG_FILE)
+            if current_config_stamp != config_stamp:
+                config = load_config()
+                pet = selected_pet(config)
+                config_stamp = current_config_stamp
+                asset_stamp = (file_signature(pet.directory / "pet.json"), file_signature(pet.sheet))
+
+            if position_path is not None:
+                current_position_stamp = file_signature(position_path)
+                if current_position_stamp != position_stamp:
+                    position = read_position(position_path)
+                    position_stamp = current_position_stamp
+
+            if pet is None:
+                pet = selected_pet(config)
+            current_asset_stamp = (file_signature(pet.directory / "pet.json"), file_signature(pet.sheet))
+            if current_asset_stamp != asset_stamp:
+                pet = selected_pet(config)
+                asset_stamp = (file_signature(pet.directory / "pet.json"), file_signature(pet.sheet))
+
+            enabled = bool(config.get("enabled", True))
+            state = str(position.get("state") or effective_state(config)) if enabled else "disabled"
+            geometry = render_geometry(config, position)
+            timing_key = json.dumps(timing_settings(config, pet.pet_id, state), sort_keys=True, default=str)
+            key = (pet.pet_id, state, enabled, geometry, timing_key, asset_stamp)
+            if key != last_key:
+                if enabled:
+                    animation = cached_animation(pet, state, config)
+                    sys.stdout.write(f"\033]2;Terminal Pet: {pet.display_name} ({state})\007")
+                    sys.stdout.flush()
+                    draw_animation(animation, geometry)
+                    mark_renderer_idle()
+                else:
+                    subprocess.run(["kitty", "+kitten", "icat", "--clear", "--silent"], check=False)
+                    sys.stdout.write("\033[2J\033[H\033]2;Terminal Pet: paused\007")
+                    mark_renderer_idle()
+                last_key = key
+
+            targets = {CONFIG_FILE, pet.directory / "pet.json", pet.sheet}
+            if position_path is not None:
+                targets.add(position_path)
+            waiter.wait(targets)
+    finally:
+        waiter.close()
 
 
 def select_command(pet_id: str | None) -> int:
@@ -874,6 +1169,8 @@ def status_command() -> int:
 
 
 def self_test() -> int:
+    from PIL import Image
+
     config = load_config()
     pets = discover_pets(config)
     if not pets:
@@ -893,7 +1190,9 @@ def self_test() -> int:
     return 0
 
 
-def parser() -> argparse.ArgumentParser:
+def parser() -> Any:
+    import argparse
+
     result = argparse.ArgumentParser(prog="kitty-pet", description=__doc__)
     result.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = result.add_subparsers(dest="command", required=True)
@@ -964,7 +1263,16 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(main())
+        direct_args = sys.argv[1:]
+        if direct_args == ["render"]:
+            exit_code = render()
+        elif len(direct_args) == 2 and direct_args[0] == "prepare":
+            exit_code = prepare_animation(direct_args[1])
+        elif direct_args in (["controller"], ["controller", "--once"]):
+            exit_code = controller(once="--once" in direct_args)
+        else:
+            exit_code = main()
+        raise SystemExit(exit_code)
     except PetError as exc:
         print(f"kitty-pet: {exc}", file=sys.stderr)
         raise SystemExit(1)

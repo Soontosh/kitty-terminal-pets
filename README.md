@@ -19,6 +19,7 @@ Animated little coworkers for the [Kitty terminal](https://sw.kovidgoyal.net/kit
 - Uses a local Unix socket, not a Bash `DEBUG` trap or a process fighting Readline for the TTY.
 - Does not trigger “python3 is still running” when the pet is the only thing left to close.
 - Leaves real close warnings in place for real commands.
+- Sleeps in Linux `inotify` while nothing changes—idle panes do no polling or Petdex rescans.
 
 ## Install
 
@@ -115,6 +116,17 @@ Edit `~/.config/kitty-pet/config.json`:
 
 The service notices changes automatically.
 
+Performance-sensitive controls live in the same file:
+
+```json
+{
+  "controller_poll_seconds": 1.0,
+  "startup_delay_seconds": 0.75
+}
+```
+
+The controller interval may be set from `0.25`–`10` seconds. Lower values detect state slightly sooner but do more socket work. The startup delay lets the shell finish opening before Kitty adds the pet rail. The defaults are the measured balance; see [Performance](docs/PERFORMANCE.md) before tuning them.
+
 ## Tune every little beat
 
 Timing can be global, per state, per pet, or per frame. Changes are live—no service or Kitty restart needed.
@@ -160,6 +172,7 @@ The uninstaller removes only the marked Kitty config block. It does not touch un
 - [Full setup guide](docs/SETUP.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Timing customization](docs/TIMING.md)
+- [Performance and benchmarks](docs/PERFORMANCE.md)
 - [Security notes](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 
