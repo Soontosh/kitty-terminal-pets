@@ -24,6 +24,9 @@ and the Petdex pets available locally, run:
 python3 demo/capture_terminal_showcases.py
 ```
 
+Pass one or more pet IDs to refresh only selected loops, for example
+`python3 demo/capture_terminal_showcases.py killua`.
+
 The tool uses an isolated Kitty control socket, restores the selected pet when
 it finishes, and records startup, slow typing, running, success, and failure.
 

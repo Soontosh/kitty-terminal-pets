@@ -8,6 +8,7 @@ theme without reading from or injecting input into the user's active TTY.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
@@ -218,8 +219,10 @@ def capture_pet(pet: str, work_dir: Path) -> None:
         "-loop",
         "0",
         *map(str, frames),
+        "-alpha",
+        "off",
         "-layers",
-        "OptimizeTransparency",
+        "Optimize",
         str(output),
     )
     if pet == "killua":
@@ -236,13 +239,22 @@ def selected_pet() -> str:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "pets",
+        nargs="*",
+        choices=PETS,
+        metavar="PET",
+        help="capture only these pets (default: all four)",
+    )
+    args = parser.parse_args()
     if not os.environ.get("DISPLAY"):
         raise SystemExit("A graphical X11/XWayland session is required")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     original_pet = selected_pet()
     try:
         with tempfile.TemporaryDirectory(prefix="kitty-pet-showcases-") as temporary:
-            for pet in PETS:
+            for pet in args.pets or PETS:
                 capture_pet(pet, Path(temporary))
     finally:
         run(KITTY_PET, "select", original_pet, stdout=subprocess.DEVNULL)
