@@ -31,6 +31,17 @@ export PATH="$temp/fake-bin:$PATH"
 
 "$KITTY_PET_BIN_DIR/kitty-pet" --version
 "$KITTY_PET_BIN_DIR/kitty-pet" list | grep -F "byte-cat"
+"$KITTY_PET_BIN_DIR/kitty-pet" timing byte-cat running --fps 4
+"$KITTY_PET_BIN_DIR/kitty-pet" timing byte-cat | grep -F "running"
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+config = json.loads((Path(os.environ["XDG_CONFIG_HOME"]) / "kitty-pet/config.json").read_text())
+assert config["timings"]["pets"]["byte-cat"]["states"]["running"]["fps"] == 4
+PY
+"$KITTY_PET_BIN_DIR/kitty-pet" timing byte-cat running --reset
 "$KITTY_PET_BIN_DIR/kitty-pet" self-test
 
 config="$XDG_CONFIG_HOME/kitty/kitty.conf"

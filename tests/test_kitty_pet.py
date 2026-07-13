@@ -52,6 +52,97 @@ class PetTests(unittest.TestCase):
             self.assertEqual(6, animation.n_frames)
             self.assertEqual(0, animation.info.get("loop"))
 
+    def test_timing_overrides_resolve_down_to_each_frame(self) -> None:
+        pet = kitty_pet.discover_pets(self.config())["byte-cat"]
+        config = {
+            **self.config(),
+            "timings": {
+                "speed": 2,
+                "states": {"running": {"fps": 5}},
+                "pets": {
+                    "byte-cat": {
+                        "speed": 0.5,
+                        "states": {"running": {"frame_ms": [100, 110, 120, 130, 140, 150]}},
+                    }
+                },
+            },
+        }
+        frames, durations = kitty_pet.animation_spec(pet, "running", config)
+        self.assertEqual([56, 57, 58, 59, 60, 61], frames)
+        self.assertEqual([200, 220, 240, 260, 280, 300], durations)
+
+    def test_timing_can_vary_completion_display_by_pet_and_state(self) -> None:
+        config = {
+            **self.config(),
+            "completion_seconds": 2.5,
+            "timings": {
+                "display_seconds": 3,
+                "states": {"failed": {"display_seconds": 4}},
+                "pets": {
+                    "byte-cat": {
+                        "display_seconds": 5,
+                        "states": {"failed": {"display_seconds": 6}},
+                    }
+                },
+            },
+        }
+        self.assertEqual(5, kitty_pet.display_seconds(config, "byte-cat", "success"))
+        self.assertEqual(6, kitty_pet.display_seconds(config, "byte-cat", "failed"))
+        self.assertEqual(4, kitty_pet.display_seconds(config, "another-pet", "failed"))
+
+    def test_rejects_bad_per_frame_timing(self) -> None:
+        pet = kitty_pet.discover_pets(self.config())["byte-cat"]
+        config = {
+            **self.config(),
+            "timings": {
+                "pets": {"byte-cat": {"states": {"running": {"frame_ms": [100, 200]}}}}
+            },
+        }
+        with self.assertRaisesRegex(kitty_pet.PetError, "has 6 frames"):
+            kitty_pet.animation_spec(pet, "running", config)
+
+    def test_timing_command_writes_a_scoped_override(self) -> None:
+        config = self.config()
+        pets = kitty_pet.discover_pets(config)
+        output = io.StringIO()
+        with (
+            mock.patch.object(kitty_pet, "load_config", return_value=config),
+            mock.patch.object(kitty_pet, "discover_pets", return_value=pets),
+            mock.patch.object(kitty_pet, "save_config") as save,
+            redirect_stdout(output),
+        ):
+            result = kitty_pet.timing_command("byte-cat", "running", 4, None, None, None, False)
+        self.assertEqual(0, result)
+        self.assertEqual(4, config["timings"]["pets"]["byte-cat"]["states"]["running"]["fps"])
+        save.assert_called_once_with(config)
+
+    def test_completion_duration_changes_apply_to_an_existing_pose(self) -> None:
+        target = Path(TEMP_ROOT.name) / "completion.json"
+        config = {
+            **self.config(),
+            "timings": {"pets": {"byte-cat": {"states": {"success": {"display_seconds": 8}}}}},
+        }
+        tab = {"id": 7}
+        window = {"id": 9, "lines": 30, "at_prompt": True, "last_cmd_exit_status": 0}
+        with (
+            mock.patch.object(kitty_pet, "position_file", return_value=target),
+            mock.patch.object(kitty_pet, "read_position", return_value={"busy": True}),
+            mock.patch.object(kitty_pet.time, "time", return_value=100),
+        ):
+            kitty_pet.update_tab_status(Path("/tmp/fake.sock"), tab, window, [window], config, False)
+
+        completed = kitty_pet.read_position(target)
+        self.assertEqual("success", completed["state"])
+        self.assertEqual(108, completed["completion_until"])
+
+        config["timings"]["pets"]["byte-cat"]["states"]["success"]["display_seconds"] = 2
+        with (
+            mock.patch.object(kitty_pet, "position_file", return_value=target),
+            mock.patch.object(kitty_pet.time, "time", return_value=103),
+        ):
+            kitty_pet.update_tab_status(Path("/tmp/fake.sock"), tab, window, [window], config, False)
+        self.assertEqual("idle", kitty_pet.read_position(target)["state"])
+
     def test_sprite_atlas_has_expected_dimensions(self) -> None:
         with kitty_pet.Image.open(ROOT / "assets" / "byte-cat" / "spritesheet.webp") as sheet:
             self.assertEqual((1536, 1872), sheet.size)

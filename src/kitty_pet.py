@@ -21,7 +21,7 @@ from typing import Any
 from PIL import Image
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "kitty-pet"
@@ -41,6 +41,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "pet_rows": 7,
     "cursor_offset_rows": 1,
     "completion_seconds": 2.5,
+    "timings": {},
 }
 
 FRAME_DEFAULTS = {"width": 192, "height": 208, "columns": 8, "rows": 9}
@@ -54,6 +55,8 @@ DEFAULT_TRACKS: dict[str, tuple[list[int], list[int]]] = {
     "failed": ([40, 41, 42, 43, 44, 45, 46, 47], [140, 140, 140, 140, 140, 140, 140, 240]),
     "waiting": ([48, 49, 50, 51, 52, 53], [150, 150, 150, 150, 150, 260]),
 }
+ANIMATION_STATES = ("idle", "running", "success", "failed", "waiting")
+TIMING_KEYS = ("speed", "fps", "frame_ms", "display_seconds")
 
 
 class PetError(RuntimeError):
@@ -158,7 +161,49 @@ def selected_pet(config: dict[str, Any] | None = None) -> Pet:
     return pets[pet_id]
 
 
-def animation_spec(pet: Pet, state: str) -> tuple[list[int], list[int]]:
+def timing_settings(config: dict[str, Any], pet_id: str, state: str) -> dict[str, Any]:
+    """Resolve timings from global -> state -> pet -> pet state."""
+    timings = config.get("timings")
+    if not isinstance(timings, dict):
+        return {}
+    pets = timings.get("pets") if isinstance(timings.get("pets"), dict) else {}
+    pet = pets.get(pet_id) if isinstance(pets.get(pet_id), dict) else {}
+    layers = (
+        timings,
+        timings.get("states", {}).get(state, {}) if isinstance(timings.get("states"), dict) else {},
+        pet,
+        pet.get("states", {}).get(state, {}) if isinstance(pet.get("states"), dict) else {},
+    )
+    resolved: dict[str, Any] = {}
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        for key in TIMING_KEYS:
+            if key not in layer:
+                continue
+            if key == "fps":
+                resolved.pop("frame_ms", None)
+            elif key == "frame_ms":
+                resolved.pop("fps", None)
+            resolved[key] = layer[key]
+    return resolved
+
+
+def number_in_range(value: Any, name: str, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        raise PetError(f"{name} must be a number from {minimum:g} to {maximum:g}")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PetError(f"{name} must be a number from {minimum:g} to {maximum:g}") from exc
+    if not minimum <= number <= maximum:
+        raise PetError(f"{name} must be from {minimum:g} to {maximum:g}")
+    return number
+
+
+def animation_spec(
+    pet: Pet, state: str, config: dict[str, Any] | None = None
+) -> tuple[list[int], list[int]]:
     manifest_name = "review" if state == "success" else state
     custom = pet.animations.get(manifest_name)
     if isinstance(custom, dict) and isinstance(custom.get("frames"), list) and custom["frames"]:
@@ -166,12 +211,37 @@ def animation_spec(pet: Pet, state: str) -> tuple[list[int], list[int]]:
         fps = float(custom.get("fps", 8.0))
         if not 0 < fps <= 60:
             raise PetError(f"invalid {manifest_name} fps for {pet.pet_id}: {fps}")
-        return frames, [max(17, round(1000 / fps))] * len(frames)
-    return DEFAULT_TRACKS.get(manifest_name, DEFAULT_TRACKS["idle"])
+        durations = [max(17, round(1000 / fps))] * len(frames)
+    else:
+        frames, durations = DEFAULT_TRACKS.get(manifest_name, DEFAULT_TRACKS["idle"])
+        frames, durations = list(frames), list(durations)
+
+    settings = timing_settings(config or {}, pet.pet_id, state)
+    if "frame_ms" in settings:
+        raw = settings["frame_ms"]
+        values = raw if isinstance(raw, list) else [raw] * len(frames)
+        if len(values) != len(frames):
+            raise PetError(
+                f"{pet.pet_id} {state} has {len(frames)} frames, but frame_ms has {len(values)} values"
+            )
+        durations = [round(number_in_range(value, "frame_ms", 17, 60000)) for value in values]
+    elif "fps" in settings:
+        fps = number_in_range(settings["fps"], "fps", 0.1, 60)
+        durations = [max(17, round(1000 / fps))] * len(frames)
+
+    speed = number_in_range(settings.get("speed", 1.0), "speed", 0.05, 20)
+    durations = [max(17, round(duration / speed)) for duration in durations]
+    return frames, durations
 
 
-def build_animation(pet: Pet, state: str) -> Path:
-    frames, durations = animation_spec(pet, state)
+def display_seconds(config: dict[str, Any], pet_id: str, state: str) -> float:
+    settings = timing_settings(config, pet_id, state)
+    raw = settings.get("display_seconds", config.get("completion_seconds", 2.5))
+    return number_in_range(raw, "display_seconds", 0, 86400)
+
+
+def build_animation(pet: Pet, state: str, config: dict[str, Any] | None = None) -> Path:
+    frames, durations = animation_spec(pet, state, config)
     source_hash = hashlib.sha256()
     source_hash.update(pet.sheet.read_bytes())
     source_hash.update(json.dumps([pet.frame, frames, durations], sort_keys=True).encode())
@@ -248,7 +318,8 @@ def effective_state(config: dict[str, Any] | None = None) -> str:
             path.unlink(missing_ok=True)
     if recent:
         stamp, state = max(recent)
-        if now - stamp <= float(config.get("completion_seconds", 2.5)) and state in {"success", "failed", "waiting"}:
+        duration = display_seconds(config, str(config.get("pet", "killua")), state)
+        if now - stamp <= duration and state in {"success", "failed", "waiting"}:
             return state
     return "idle"
 
@@ -370,6 +441,7 @@ def update_tab_status(
     if busy:
         state = "running"
         completion_until = 0.0
+        completed_at = 0.0
     elif was_busy:
         exit_codes = [
             int(window["last_cmd_exit_status"])
@@ -377,13 +449,23 @@ def update_tab_status(
             if isinstance(window.get("last_cmd_exit_status"), int)
         ]
         state = "success" if not exit_codes or all(code == 0 for code in exit_codes) else "failed"
-        completion_until = now + float(config.get("completion_seconds", 2.5))
-    elif now < float(data.get("completion_until", 0.0)):
-        state = str(data.get("state", "idle"))
-        completion_until = float(data.get("completion_until", 0.0))
+        completed_at = now
+        completion_until = completed_at + display_seconds(config, str(config.get("pet", "killua")), state)
     else:
-        state = "idle"
-        completion_until = 0.0
+        previous_state = str(data.get("state", "idle"))
+        completed_at = float(data.get("completed_at", 0.0))
+        if completed_at and previous_state in {"success", "failed", "waiting"}:
+            completion_until = completed_at + display_seconds(
+                config, str(config.get("pet", "killua")), previous_state
+            )
+        else:
+            completion_until = float(data.get("completion_until", 0.0))
+        if now < completion_until:
+            state = previous_state
+        else:
+            state = "idle"
+            completion_until = 0.0
+            completed_at = 0.0
 
     data.update(
         {
@@ -393,6 +475,7 @@ def update_tab_status(
             "state": state,
             "busy": busy,
             "completion_until": completion_until,
+            "completed_at": completed_at,
             "updated_at": now,
         }
     )
@@ -572,10 +655,11 @@ def render() -> int:
         position = read_position(Path(position_path)) if position_path else {}
         state = str(position.get("state") or effective_state(config)) if enabled else "disabled"
         geometry = render_geometry(config, position)
-        key = (pet.pet_id, state, enabled, geometry)
+        timing_key = json.dumps(timing_settings(config, pet.pet_id, state), sort_keys=True, default=str)
+        key = (pet.pet_id, state, enabled, geometry, timing_key)
         if key != last_key:
             if enabled:
-                animation = build_animation(pet, state)
+                animation = build_animation(pet, state, config)
                 sys.stdout.write(f"\033]2;Terminal Pet: {pet.display_name} ({state})\007")
                 sys.stdout.flush()
                 draw_animation(animation, geometry)
@@ -618,7 +702,7 @@ def select_command(pet_id: str | None) -> int:
     config["enabled"] = True
     save_config(config)
     for state in ("idle", "running", "success", "failed", "waiting"):
-        build_animation(pets[pet_id], state)
+        build_animation(pets[pet_id], state, config)
     print(f"Selected {pets[pet_id].display_name}. Existing pet panes will update automatically.")
     return 0
 
@@ -629,6 +713,152 @@ def list_command() -> int:
     for pet in sorted(pets.values(), key=lambda item: item.display_name.casefold()):
         marker = "*" if pet.pet_id == config.get("pet") else " "
         print(f"{marker} {pet.pet_id:<16} {pet.display_name}")
+    return 0
+
+
+def timing_summary(config: dict[str, Any], pet: Pet) -> None:
+    print(f"Timing for {pet.display_name} ({pet.pet_id})")
+    print("State     Frame timing (ms)                    Cycle      Display")
+    for state in ANIMATION_STATES:
+        _, durations = animation_spec(pet, state, config)
+        if len(set(durations)) == 1:
+            frame_text = str(durations[0])
+        else:
+            frame_text = ",".join(str(value) for value in durations)
+        if len(frame_text) > 36:
+            frame_text = frame_text[:33] + "..."
+        display = (
+            f"{display_seconds(config, pet.pet_id, state):g}s"
+            if state in {"success", "failed", "waiting"}
+            else "task-driven" if state == "running" else "until work"
+        )
+        print(f"{state:<9} {frame_text:<36} {sum(durations) / 1000:>6.2f}s    {display}")
+
+
+def parse_frame_ms(raw: str) -> float | list[float]:
+    parts = [item.strip() for item in raw.split(",")]
+    if not parts or any(not item for item in parts):
+        raise PetError("frame_ms must be one number or a comma-separated list")
+    values = [number_in_range(item, "frame_ms", 17, 60000) for item in parts]
+    return values[0] if len(values) == 1 else values
+
+
+def prune_timing_config(config: dict[str, Any]) -> None:
+    timings = config.get("timings")
+    if not isinstance(timings, dict):
+        return
+    pets = timings.get("pets")
+    if isinstance(pets, dict):
+        for pet_id, pet in list(pets.items()):
+            if isinstance(pet, dict) and isinstance(pet.get("states"), dict) and not pet["states"]:
+                pet.pop("states")
+            if not pet:
+                pets.pop(pet_id)
+        if not pets:
+            timings.pop("pets")
+    states = timings.get("states")
+    if isinstance(states, dict) and not states:
+        timings.pop("states")
+
+
+def timing_command(
+    pet_id: str | None,
+    state: str,
+    fps: float | None,
+    frame_ms_raw: str | None,
+    speed: float | None,
+    shown_seconds: float | None,
+    reset: bool,
+) -> int:
+    config = load_config()
+    pets = discover_pets(config)
+    pet_id = pet_id or str(config.get("pet", "killua"))
+    if pet_id != "all" and pet_id not in pets:
+        raise PetError(f"unknown pet {pet_id!r}; run 'kitty-pet list' to see available pets")
+
+    changes = any(value is not None for value in (fps, frame_ms_raw, speed, shown_seconds))
+    if reset and changes:
+        raise PetError("--reset cannot be combined with timing values")
+    if shown_seconds is not None and state in {"idle", "running"}:
+        raise PetError("--display-seconds applies to success, failed, waiting, or all")
+    if not reset and not changes:
+        if pet_id == "all":
+            print(json.dumps(config.get("timings", {}), indent=2, sort_keys=True))
+        else:
+            timing_summary(config, pets[pet_id])
+        return 0
+
+    timings = config.get("timings")
+    if not isinstance(timings, dict):
+        timings = {}
+        config["timings"] = timings
+
+    if reset:
+        if pet_id == "all" and state == "all":
+            config["timings"] = {}
+        elif pet_id == "all":
+            states = timings.get("states")
+            if isinstance(states, dict):
+                states.pop(state, None)
+        elif state == "all":
+            pet_timings = timings.get("pets")
+            if isinstance(pet_timings, dict):
+                pet_timings.pop(pet_id, None)
+        else:
+            pet_timings = timings.get("pets")
+            pet_config = pet_timings.get(pet_id) if isinstance(pet_timings, dict) else None
+            states = pet_config.get("states") if isinstance(pet_config, dict) else None
+            if isinstance(states, dict):
+                states.pop(state, None)
+        prune_timing_config(config)
+        save_config(config)
+        print(f"Reset timing overrides for {pet_id}/{state}.")
+        return 0
+
+    if pet_id == "all":
+        scope = timings
+    else:
+        pet_timings = timings.get("pets")
+        if not isinstance(pet_timings, dict):
+            pet_timings = {}
+            timings["pets"] = pet_timings
+        scope = pet_timings.get(pet_id)
+        if not isinstance(scope, dict):
+            scope = {}
+            pet_timings[pet_id] = scope
+    if state != "all":
+        states = scope.get("states")
+        if not isinstance(states, dict):
+            states = {}
+            scope["states"] = states
+        state_scope = states.get(state)
+        if not isinstance(state_scope, dict):
+            state_scope = {}
+            states[state] = state_scope
+        scope = state_scope
+
+    if fps is not None:
+        scope["fps"] = number_in_range(fps, "fps", 0.1, 60)
+        scope.pop("frame_ms", None)
+    if frame_ms_raw is not None:
+        frame_ms = parse_frame_ms(frame_ms_raw)
+        if isinstance(frame_ms, list):
+            if pet_id == "all" or state == "all":
+                raise PetError("a frame_ms list requires one specific pet and state")
+            frames, _ = animation_spec(pets[pet_id], state, {})
+            if len(frame_ms) != len(frames):
+                raise PetError(f"{pet_id} {state} needs exactly {len(frames)} frame_ms values")
+        scope["frame_ms"] = frame_ms
+        scope.pop("fps", None)
+    if speed is not None:
+        scope["speed"] = number_in_range(speed, "speed", 0.05, 20)
+    if shown_seconds is not None:
+        scope["display_seconds"] = number_in_range(shown_seconds, "display_seconds", 0, 86400)
+
+    save_config(config)
+    print(f"Updated timing overrides for {pet_id}/{state}.")
+    if pet_id != "all":
+        timing_summary(config, pets[pet_id])
     return 0
 
 
@@ -654,7 +884,7 @@ def self_test() -> int:
             if image.size != expected:
                 raise PetError(f"{pet.pet_id}: invalid sheet dimensions {image.size}, expected {expected}")
     pet = selected_pet(config)
-    outputs = [build_animation(pet, state) for state in ("idle", "running", "success", "failed", "waiting")]
+    outputs = [build_animation(pet, state, config) for state in ANIMATION_STATES]
     for output in outputs:
         with Image.open(output) as animation:
             if getattr(animation, "n_frames", 0) < 1:
@@ -670,6 +900,15 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("list", help="list pets from the shared Codex/Petdex registry")
     choose = commands.add_parser("select", help="select a pet interactively or by id")
     choose.add_argument("pet_id", nargs="?")
+    timing = commands.add_parser("timing", help="show or customize animation timing")
+    timing.add_argument("pet_id", nargs="?", help="pet id, or 'all' for global defaults")
+    timing.add_argument("state", nargs="?", choices=("all", *ANIMATION_STATES), default="all")
+    rate = timing.add_mutually_exclusive_group()
+    rate.add_argument("--fps", type=float, help="frames per second (0.1-60)")
+    rate.add_argument("--frame-ms", help="one frame duration or a comma-separated duration for every frame")
+    timing.add_argument("--speed", type=float, help="speed multiplier (0.05-20; 0.5 is half speed)")
+    timing.add_argument("--display-seconds", type=float, help="how long completion states remain visible (0-86400)")
+    timing.add_argument("--reset", action="store_true", help="remove overrides at this pet/state scope")
     controller_parser = commands.add_parser("controller", help=argparse.SUPPRESS)
     controller_parser.add_argument("--once", action="store_true")
     commands.add_parser("close", help="close all managed pet panes")
@@ -692,6 +931,10 @@ def main() -> int:
         return list_command()
     if args.command == "select":
         return select_command(args.pet_id)
+    if args.command == "timing":
+        return timing_command(
+            args.pet_id, args.state, args.fps, args.frame_ms, args.speed, args.display_seconds, args.reset
+        )
     if args.command == "controller":
         return controller(args.once)
     if args.command == "close":
